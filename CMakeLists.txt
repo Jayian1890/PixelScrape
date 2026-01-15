@@ -31,6 +31,7 @@ set(SOURCES
     src/storage/state_manager.cpp
     src/api/http_server.cpp
     src/api/websocket_server.cpp
+    src/api/transmission_rpc.cpp
 )
 
 # Create executable

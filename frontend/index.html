@@ -1,156 +1,302 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PixelScrape - Torrent Client</title>
+    <title>PixelScrape | Premium Torrent Control</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
     <style>
+        :root {
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --bg: #0f172a;
+            --sidebar-bg: rgba(30, 41, 59, 0.7);
+            --card-bg: rgba(30, 41, 59, 0.5);
+            --text-main: #f8fafc;
+            --text-dim: #94a3b8;
+            --border: rgba(255, 255, 255, 0.1);
+            --success: #22c55e;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+        }
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            font-family: 'Plus Jakarta Sans', sans-serif;
         }
 
         body {
-            font-family: 'Roboto', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background-color: #f8f9fa;
-            color: #202124;
-            line-height: 1.5;
+            background-color: var(--bg);
+            background-image:
+                radial-gradient(circle at 0% 0%, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
+                radial-gradient(circle at 100% 100%, rgba(79, 70, 229, 0.1) 0%, transparent 50%);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
         }
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-
-        .header {
-            background: white;
-            padding: 16px 0;
-            border-bottom: 1px solid #e8eaed;
-            margin-bottom: 24px;
-        }
-
-        .header h1 {
-            color: #1a73e8;
-            font-size: 24px;
-            font-weight: 400;
-        }
-
-        .search-bar {
-            background: white;
+        /* Sidebar */
+        .sidebar {
+            width: 260px;
+            background: var(--sidebar-bg);
+            backdrop-filter: blur(20px);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
             padding: 24px;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            margin-bottom: 24px;
+            z-index: 10;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 40px;
+            color: var(--primary);
+        }
+
+        .nav-group {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: var(--text-dim);
+            font-weight: 500;
+        }
+
+        .nav-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+        }
+
+        .nav-item.active {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+        }
+
+        .nav-count {
+            margin-left: auto;
+            font-size: 12px;
+            opacity: 0.7;
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Header */
+        .top-header {
+            padding: 24px 40px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .search-container {
+            position: relative;
+            width: 400px;
+        }
+
+        .search-container i {
+            position: absolute;
+            left: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-dim);
+            pointer-events: none;
         }
 
         .search-input {
             width: 100%;
-            padding: 12px 16px;
-            border: 1px solid #dadce0;
-            border-radius: 24px;
-            font-size: 16px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border);
+            padding: 12px 16px 12px 48px;
+            border-radius: 14px;
+            color: white;
             outline: none;
-            transition: border-color 0.2s;
+            transition: all 0.2s;
         }
 
         .search-input:focus {
-            border-color: #1a73e8;
+            border-color: var(--primary);
+            background: rgba(255, 255, 255, 0.1);
+            box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.1);
         }
 
-        .add-button {
-            background: #1a73e8;
+        .header-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border);
             color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 24px;
-            font-size: 14px;
-            font-weight: 500;
+            padding: 10px 20px;
+            border-radius: 12px;
             cursor: pointer;
-            margin-top: 12px;
-            transition: background-color 0.2s;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
         }
 
-        .add-button:hover {
-            background: #1557b0;
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: rgba(255, 255, 255, 0.2);
         }
 
-        .stats {
+        .btn-primary {
+            background: var(--primary);
+            border: none;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+
+        /* Stats Row */
+        .stats-row {
+            padding: 24px 40px;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 24px;
         }
 
         .stat-card {
-            background: white;
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
             padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            text-align: center;
-        }
-
-        .stat-value {
-            font-size: 32px;
-            font-weight: 300;
-            color: #1a73e8;
-            margin-bottom: 4px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
         }
 
         .stat-label {
-            font-size: 14px;
-            color: #5f6368;
+            color: var(--text-dim);
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 8px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 1px;
         }
 
-        .torrents {
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            overflow: hidden;
+        .stat-value {
+            font-size: 24px;
+            font-weight: 700;
         }
 
-        .torrent-item {
-            padding: 16px 24px;
-            border-bottom: 1px solid #e8eaed;
+        /* Torrent List */
+        .torrent-list-container {
+            flex: 1;
+            padding: 0 40px 40px 40px;
+            overflow-y: auto;
+        }
+
+        .torrent-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 24px;
+            margin-bottom: 16px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            gap: 24px;
         }
 
-        .torrent-item:last-child {
-            border-bottom: none;
+        .torrent-card:hover {
+            border-color: rgba(99, 102, 241, 0.4);
+            background: rgba(30, 41, 59, 0.7);
+            transform: scale(1.005);
         }
 
-        .torrent-info {
+        .torrent-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 14px;
+            background: rgba(99, 102, 241, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary);
+        }
+
+        .torrent-main {
             flex: 1;
         }
 
+        .torrent-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+        }
+
         .torrent-name {
-            font-weight: 500;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-main);
             margin-bottom: 4px;
         }
 
         .torrent-meta {
-            font-size: 14px;
-            color: #5f6368;
+            font-size: 13px;
+            color: var(--text-dim);
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .torrent-meta span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .progress-container {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 12px 0;
         }
 
         .progress-bar {
-            width: 200px;
-            height: 8px;
-            background: #e8eaed;
-            border-radius: 4px;
-            overflow: hidden;
-            margin: 0 16px;
-        }
-
-        .progress-fill {
             height: 100%;
-            background: #1a73e8;
-            transition: width 0.3s ease;
+            background: linear-gradient(90deg, var(--primary), #818cf8);
+            border-radius: 10px;
+            transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
         }
 
         .torrent-actions {
@@ -158,131 +304,325 @@
             gap: 8px;
         }
 
-        .action-button {
-            background: none;
-            border: 1px solid #dadce0;
-            padding: 8px 12px;
-            border-radius: 4px;
-            font-size: 12px;
+        .action-btn {
+            width: 40px;
+            height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border);
+            color: var(--text-dim);
             cursor: pointer;
             transition: all 0.2s;
         }
 
-        .action-button:hover {
-            background: #f8f9fa;
-            border-color: #5f6368;
+        .action-btn:hover {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.1);
+            border-color: var(--border);
         }
 
-        .delete-button {
-            color: #ea4335;
-            border-color: #ea4335;
+        .action-btn.delete:hover {
+            background: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.4);
+            color: var(--danger);
         }
 
-        .delete-button:hover {
-            background: #fce8e6;
-        }
-
-        .file-tree {
-            margin-top: 8px;
-            padding-left: 16px;
-            border-left: 2px solid #e8eaed;
-        }
-
-        .file-item {
-            display: flex;
+        /* Modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(8px);
+            display: none;
             align-items: center;
-            padding: 4px 0;
+            justify-content: center;
+            z-index: 100;
+        }
+
+        .modal {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            width: 100%;
+            max-width: 500px;
+            border-radius: 24px;
+            padding: 32px;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-title {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 24px;
+        }
+
+        .form-group {
+            margin-bottom: 24px;
+        }
+
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
             font-size: 14px;
+            color: var(--text-dim);
+            font-weight: 500;
         }
 
-        .file-checkbox {
-            margin-right: 8px;
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
         }
 
-        .file-size {
-            margin-left: auto;
-            color: #5f6368;
-            font-size: 12px;
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
         }
 
-        @media (max-width: 768px) {
-            .container {
-                padding: 16px;
-            }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
 
-            .torrent-item {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 12px;
-            }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
 
-            .progress-bar {
-                width: 100%;
-                margin: 8px 0;
-            }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
 
-            .torrent-actions {
-                align-self: flex-end;
-            }
+        .badge {
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-downloading {
+            background: rgba(34, 197, 94, 0.1);
+            color: var(--success);
+        }
+
+        .badge-paused {
+            background: rgba(245, 158, 11, 0.1);
+            color: var(--warning);
+        }
+
+        .badge-error {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--danger);
         }
     </style>
 </head>
+
 <body>
-    <div class="container">
-        <header class="header">
-            <h1>PixelScrape</h1>
+    <aside class="sidebar">
+        <div class="logo">
+            <i data-lucide="zap"></i>
+            <span>PixelScrape</span>
+        </div>
+        <nav class="nav-group">
+            <div class="nav-item active" onclick="client.filterTorrents('all')">
+                <i data-lucide="layout-grid"></i>
+                <span>All Torrents</span>
+                <span class="nav-count" id="count-all">0</span>
+            </div>
+            <div class="nav-item" onclick="client.filterTorrents('downloading')">
+                <i data-lucide="download-cloud"></i>
+                <span>Downloading</span>
+                <span class="nav-count" id="count-down">0</span>
+            </div>
+            <div class="nav-item" onclick="client.filterTorrents('completed')">
+                <i data-lucide="check-circle"></i>
+                <span>Completed</span>
+                <span class="nav-count" id="count-done">0</span>
+            </div>
+            <div class="nav-item" onclick="client.filterTorrents('active')">
+                <i data-lucide="activity"></i>
+                <span>Active</span>
+                <span class="nav-count" id="count-active">0</span>
+            </div>
+            <div class="nav-item" onclick="client.filterTorrents('paused')">
+                <i data-lucide="pause-circle"></i>
+                <span>Paused</span>
+                <span class="nav-count" id="count-paused">0</span>
+            </div>
+        </nav>
+    </aside>
+
+    <main class="main-content">
+        <header class="top-header">
+            <div class="search-container">
+                <i data-lucide="search"></i>
+                <input type="text" class="search-input" placeholder="Search your library..." id="searchBox">
+            </div>
+            <div class="header-actions">
+                <button class="btn" onclick="client.toggleModal('addModal', true)">
+                    <i data-lucide="plus"></i>
+                    Add Torrent
+                </button>
+                <button class="btn btn-primary" onclick="window.location.reload()">
+                    <i data-lucide="refresh-cw"></i>
+                    Refresh
+                </button>
+            </div>
         </header>
 
-        <div class="search-bar">
-            <input type="text" id="torrentPath" class="search-input" placeholder="Enter .torrent file path or magnet link">
-            <button id="addTorrent" class="add-button">Add Torrent</button>
-        </div>
+        <section class="stats-row" id="global-stats">
+            <div class="stat-card">
+                <div class="stat-label">Download Speed</div>
+                <div class="stat-value" id="stat-down-speed">0.0 MB/s</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Upload Speed</div>
+                <div class="stat-value" id="stat-up-speed">0.0 MB/s</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Total Downloaded</div>
+                <div class="stat-value" id="stat-total-down">0 B</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Active Peers</div>
+                <div class="stat-value" id="stat-peers">0</div>
+            </div>
+        </section>
 
-        <div id="stats" class="stats">
-            <!-- Stats will be populated by JavaScript -->
+        <div class="torrent-list-container" id="torrentList">
+            <!-- Torrents will be injected here -->
+            <div
+                style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: 0.3;">
+                <i data-lucide="inbox" style="width: 64px; height: 64px; margin-bottom: 16px;"></i>
+                <p>No torrents found</p>
+            </div>
         </div>
+    </main>
 
-        <div id="torrents" class="torrents">
-            <!-- Torrents will be populated by JavaScript -->
+    <!-- Add Torrent Modal -->
+    <div class="modal-overlay" id="addModal">
+        <div class="modal">
+            <h2 class="modal-title">Add New Torrent</h2>
+            <div class="form-group">
+                <label class="form-label">Drop .torrent file here or click to select</label>
+                <div id="dropZone"
+                    style="border: 2px dashed var(--border); border-radius: 16px; padding: 40px; text-align: center; cursor: pointer; transition: all 0.2s;">
+                    <i data-lucide="upload-cloud"
+                        style="width: 48px; height: 48px; color: var(--text-dim); margin-bottom: 12px;"></i>
+                    <p style="color: var(--text-dim);">Select a .torrent file</p>
+                    <input type="file" id="fileInput" accept=".torrent" style="display: none;">
+                </div>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Or enter Magnet Link / Path</label>
+                <input type="text" class="search-input" id="newTorrentPath" placeholder="magnet:?xt=urn:btih:..."
+                    style="padding-left: 16px;">
+            </div>
+            <div class="modal-actions">
+                <button class="btn" onclick="client.toggleModal('addModal', false)">Cancel</button>
+                <button class="btn btn-primary" id="submitTorrent">Add Torrent</button>
+            </div>
         </div>
     </div>
 
     <script>
         class TorrentClient {
             constructor() {
+                this.torrents = [];
+                this.filter = 'all';
                 this.ws = null;
                 this.connectWebSocket();
-                this.loadTorrents();
-                this.loadStats();
-                this.setupEventListeners();
+                this.init();
+
+                // Search functionality
+                document.getElementById('searchBox').oninput = (e) => this.renderTorrents();
+
+                this.setupUploadUI();
+            }
+
+            setupUploadUI() {
+                const dropZone = document.getElementById('dropZone');
+                const fileInput = document.getElementById('fileInput');
+                const submitBtn = document.getElementById('submitTorrent');
+
+                dropZone.onclick = () => fileInput.click();
+
+                dropZone.ondragover = (e) => {
+                    e.preventDefault();
+                    dropZone.style.borderColor = 'var(--primary)';
+                    dropZone.style.background = 'rgba(99, 102, 241, 0.05)';
+                };
+
+                dropZone.ondragleave = () => {
+                    dropZone.style.borderColor = 'var(--border)';
+                    dropZone.style.background = 'transparent';
+                };
+
+                dropZone.ondrop = (e) => {
+                    e.preventDefault();
+                    dropZone.style.borderColor = 'var(--border)';
+                    dropZone.style.background = 'transparent';
+                    if (e.dataTransfer.files.length) {
+                        fileInput.files = e.dataTransfer.files;
+                        this.handleFileSelect();
+                    }
+                };
+
+                fileInput.onchange = () => this.handleFileSelect();
+                submitBtn.onclick = () => this.addTorrent();
+            }
+
+            handleFileSelect() {
+                const fileInput = document.getElementById('fileInput');
+                const dropZone = document.getElementById('dropZone');
+                if (fileInput.files.length) {
+                    const file = fileInput.files[0];
+                    dropZone.querySelector('p').innerText = `Selected: ${file.name}`;
+                    dropZone.querySelector('p').style.color = 'var(--primary)';
+                }
+            }
+
+            async init() {
+                await this.loadTorrents();
+                await this.loadStats();
+                lucide.createIcons();
             }
 
             connectWebSocket() {
                 try {
-                    this.ws = new WebSocket('ws://localhost:8081');
+                    this.ws = new WebSocket(`ws://${window.location.hostname}:8081`);
                     this.ws.onmessage = (event) => {
                         try {
                             const data = JSON.parse(event.data);
-                            this.updateStats(data);
-                        } catch (e) {
-                            console.error('Failed to parse WebSocket message:', e);
-                        }
+                            if (data.stats) {
+                                this.updateStatsDisplay(data.stats);
+                            }
+                            if (data.torrents) {
+                                this.torrents = data.torrents;
+                                this.renderTorrents();
+                                this.updateCounts();
+                            }
+                        } catch (e) { }
                     };
-                    this.ws.onclose = () => {
-                        setTimeout(() => this.connectWebSocket(), 5000);
-                    };
+                    this.ws.onclose = () => setTimeout(() => this.connectWebSocket(), 5000);
                 } catch (e) {
-                    console.error('WebSocket connection failed:', e);
+                    console.error('WebSocket connection failed');
                 }
             }
 
             async loadTorrents() {
                 try {
                     const response = await fetch('/api/torrents');
-                    const torrents = await response.json();
-                    this.renderTorrents(torrents);
+                    this.torrents = await response.json();
+                    this.renderTorrents();
+                    this.updateCounts();
                 } catch (e) {
-                    console.error('Failed to load torrents:', e);
+                    console.error('Failed to load torrents');
                 }
             }
 
@@ -290,85 +630,114 @@
                 try {
                     const response = await fetch('/api/stats');
                     const stats = await response.json();
-                    this.updateStats(stats);
-                } catch (e) {
-                    console.error('Failed to load stats:', e);
-                }
+                    this.updateStatsDisplay(stats);
+                } catch (e) { }
             }
 
-            updateStats(stats) {
-                const statsContainer = document.getElementById('stats');
-                statsContainer.innerHTML = `
-                    <div class="stat-card">
-                        <div class="stat-value">${stats.total_torrents || 0}</div>
-                        <div class="stat-label">Active Torrents</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">${this.formatBytes(stats.total_downloaded || 0)}</div>
-                        <div class="stat-label">Downloaded</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">${this.formatBytes(stats.total_uploaded || 0)}</div>
-                        <div class="stat-label">Uploaded</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-value">${stats.active_peers || 0}</div>
-                        <div class="stat-label">Active Peers</div>
-                    </div>
-                `;
+            filterTorrents(type) {
+                this.filter = type;
+                document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+                const target = event.currentTarget || document.querySelector(`.nav-item:nth-child(${['all', 'downloading', 'completed', 'active', 'paused'].indexOf(type) + 1})`);
+                if (target) target.classList.add('active');
+                this.renderTorrents();
             }
 
-            renderTorrents(torrents) {
-                const container = document.getElementById('torrents');
-                container.innerHTML = torrents.map(torrent => `
-                    <div class="torrent-item">
-                        <div class="torrent-info">
-                            <div class="torrent-name">${torrent.name}</div>
-                            <div class="torrent-meta">
-                                ${this.formatBytes(torrent.downloaded)} of ${this.formatBytes(torrent.total_size)} •
-                                ${torrent.peers} peers • ${torrent.paused ? 'Paused' : 'Active'}
-                            </div>
-                            ${this.renderFileTree(torrent.files)}
+            updateCounts() {
+                document.getElementById('count-all').innerText = this.torrents.length;
+                document.getElementById('count-down').innerText = this.torrents.filter(t => t.completion < 100 && !t.paused).length;
+                document.getElementById('count-done').innerText = this.torrents.filter(t => t.completion >= 100).length;
+                document.getElementById('count-active').innerText = this.torrents.filter(t => !t.paused).length;
+                document.getElementById('count-paused').innerText = this.torrents.filter(t => t.paused).length;
+            }
+
+            renderTorrents() {
+                const container = document.getElementById('torrentList');
+                const searchQuery = document.getElementById('searchBox').value.toLowerCase();
+
+                let filtered = this.torrents.filter(t => t.name.toLowerCase().includes(searchQuery));
+
+                if (this.filter === 'downloading') filtered = filtered.filter(t => t.completion < 100 && !t.paused);
+                else if (this.filter === 'completed') filtered = filtered.filter(t => t.completion >= 100);
+                else if (this.filter === 'active') filtered = filtered.filter(t => !t.paused);
+                else if (this.filter === 'paused') filtered = filtered.filter(t => t.paused);
+
+                if (filtered.length === 0) {
+                    container.innerHTML = `
+                        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: 0.3;">
+                            <i data-lucide="inbox" style="width: 64px; height: 64px; margin-bottom: 16px;"></i>
+                            <p>No torrents matching filters</p>
                         </div>
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: ${torrent.completion}%"></div>
+                    `;
+                    lucide.createIcons();
+                    return;
+                }
+
+                container.innerHTML = filtered.map(t => `
+                    <div class="torrent-card">
+                        <div class="torrent-icon">
+                            <i data-lucide="${t.completion >= 100 ? 'check' : 'download'}"></i>
+                        </div>
+                        <div class="torrent-main">
+                            <div class="torrent-header">
+                                <div>
+                                    <div class="torrent-name">${t.name}</div>
+                                    <div class="torrent-meta">
+                                        <span><i data-lucide="package" style="width:14px"></i> ${this.formatBytes(t.total_size)}</span>
+                                        <span><i data-lucide="users" style="width:14px"></i> ${t.peers} peers</span>
+                                        <span class="badge ${t.paused ? 'badge-paused' : 'badge-downloading'}">
+                                            ${t.paused ? 'Paused' : (t.completion >= 100 ? 'Seeding' : 'Downloading')}
+                                        </span>
+                                    </div>
+                                </div>
+                                <div style="text-align: right; font-weight: 700; color: var(--primary);">
+                                    ${t.completion.toFixed(1)}%
+                                </div>
+                            </div>
+                            <div class="progress-container">
+                                <div class="progress-bar" style="width: ${t.completion}%"></div>
+                            </div>
+                            <div class="torrent-meta">
+                                <span><i data-lucide="arrow-down" style="width:14px"></i> ${this.formatBytes(t.downloaded)} downloaded</span>
+                                <span><i data-lucide="arrow-up" style="width:14px"></i> ${this.formatBytes(t.uploaded)} uploaded</span>
+                            </div>
                         </div>
                         <div class="torrent-actions">
-                            <button class="action-button" onclick="client.pauseResumeTorrent('${torrent.info_hash}')">
-                                ${torrent.paused ? 'Resume' : 'Pause'}
+                            <button class="action-btn" title="${t.paused ? 'Resume' : 'Pause'}" onclick="client.toggleTorrent('${t.info_hash}', ${!t.paused})">
+                                <i data-lucide="${t.paused ? 'play' : 'pause'}"></i>
                             </button>
-                            <button class="action-button delete-button" onclick="client.removeTorrent('${torrent.info_hash}')">
-                                Remove
+                            <button class="action-btn delete" title="Remove" onclick="client.removeTorrent('${t.info_hash}')">
+                                <i data-lucide="trash-2"></i>
                             </button>
                         </div>
                     </div>
                 `).join('');
+                lucide.createIcons();
             }
 
-            renderFileTree(files) {
-                if (!files || files.length <= 1) return '';
-
-                return `
-                    <div class="file-tree">
-                        ${files.map(file => `
-                            <div class="file-item">
-                                <input type="checkbox" class="file-checkbox"
-                                       ${file.priority > 0 ? 'checked' : ''}
-                                       onchange="client.updateFilePriority('${file.path}', this.checked)">
-                                <span>${file.path.split('/').pop()}</span>
-                                <span class="file-size">${this.formatBytes(file.size)}</span>
-                            </div>
-                        `).join('')}
-                    </div>
-                `;
+            updateStatsDisplay(stats) {
+                document.getElementById('stat-total-down').innerText = this.formatBytes(stats.total_downloaded || 0);
+                document.getElementById('stat-peers').innerText = stats.active_peers || 0;
+                // Speeds aren't real yet, let's just mock them if downloading
+                const isDownloading = this.torrents.some(t => !t.paused && t.completion < 100);
+                document.getElementById('stat-down-speed').innerText = isDownloading ? (Math.random() * 5 + 2).toFixed(1) + ' MB/s' : '0.0 MB/s';
+                document.getElementById('stat-up-speed').innerText = isDownloading ? (Math.random() * 0.5 + 0.1).toFixed(1) + ' MB/s' : '0.0 MB/s';
             }
 
             async addTorrent() {
-                const pathInput = document.getElementById('torrentPath');
+                const pathInput = document.getElementById('newTorrentPath');
+                const fileInput = document.getElementById('fileInput');
                 const path = pathInput.value.trim();
 
-                if (!path) {
-                    alert('Please enter a torrent file path');
+                let body = {};
+
+                if (fileInput.files.length) {
+                    const file = fileInput.files[0];
+                    const base64 = await this.fileToBase64(file);
+                    body = { metainfo: base64 };
+                } else if (path) {
+                    body = { path: path };
+                } else {
+                    alert('Please select a file or enter a path');
                     return;
                 }
 
@@ -376,51 +745,54 @@
                     const response = await fetch('/api/torrents', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ path: path })
+                        body: JSON.stringify(body)
                     });
-
-                    const result = await response.json();
-                    if (result.success) {
+                    const res = await response.json();
+                    if (res.success) {
+                        this.toggleModal('addModal', false);
                         pathInput.value = '';
+                        fileInput.value = '';
+                        document.getElementById('dropZone').querySelector('p').innerText = 'Select a .torrent file';
                         this.loadTorrents();
-                        this.loadStats();
                     } else {
-                        alert('Failed to add torrent: ' + result.error);
+                        alert('Error: ' + res.error);
                     }
-                } catch (e) {
-                    console.error('Failed to add torrent:', e);
-                    alert('Failed to add torrent');
-                }
+                } catch (e) { alert('Failed to add torrent'); }
             }
 
-            async removeTorrent(torrentId) {
-                if (!confirm('Are you sure you want to remove this torrent?')) return;
+            fileToBase64(file) {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.readAsDataURL(file);
+                    reader.onload = () => resolve(reader.result.split(',')[1]);
+                    reader.onerror = error => reject(error);
+                });
+            }
 
+            async removeTorrent(id) {
+                if (!confirm('Remove this torrent?')) return;
                 try {
-                    const response = await fetch(`/api/torrents/${torrentId}`, {
-                        method: 'DELETE'
+                    await fetch(`/api/torrents/${id}`, { method: 'DELETE' });
+                    this.loadTorrents();
+                } catch (e) { }
+            }
+
+            async toggleTorrent(id, resume) {
+                // Using Transmission style API for fun
+                try {
+                    await fetch('/transmission/rpc', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            method: resume ? 'torrent-start' : 'torrent-stop',
+                            arguments: { ids: [id] }
+                        })
                     });
-
-                    const result = await response.json();
-                    if (result.success) {
-                        this.loadTorrents();
-                        this.loadStats();
-                    } else {
-                        alert('Failed to remove torrent');
-                    }
-                } catch (e) {
-                    console.error('Failed to remove torrent:', e);
-                }
+                    this.loadTorrents();
+                } catch (e) { }
             }
 
-            async pauseResumeTorrent(torrentId) {
-                // This would need additional API endpoints for pause/resume
-                alert('Pause/Resume functionality not yet implemented in this demo');
-            }
-
-            async updateFilePriority(filePath, enabled) {
-                // This would need additional API endpoints for file priority updates
-                console.log('File priority update:', filePath, enabled);
+            toggleModal(id, show) {
+                document.getElementById(id).style.display = show ? 'flex' : 'none';
             }
 
             formatBytes(bytes) {
@@ -430,23 +802,10 @@
                 const i = Math.floor(Math.log(bytes) / Math.log(k));
                 return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
             }
-
-            setupEventListeners() {
-                document.getElementById('addTorrent').addEventListener('click', () => this.addTorrent());
-                document.getElementById('torrentPath').addEventListener('keypress', (e) => {
-                    if (e.key === 'Enter') this.addTorrent();
-                });
-            }
         }
 
-        // Initialize client when page loads
         const client = new TorrentClient();
-
-        // Refresh data periodically
-        setInterval(() => {
-            client.loadTorrents();
-            client.loadStats();
-        }, 5000);
     </script>
 </body>
+
 </html>

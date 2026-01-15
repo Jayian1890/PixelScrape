@@ -24,6 +24,15 @@ TorrentMetadata TorrentMetadataParser::parse(const std::filesystem::path& torren
     return parse_from_bencode(*std::get<std::unique_ptr<BencodeDict>>(bencode_value));
 }
 
+TorrentMetadata TorrentMetadataParser::parse(const std::string& data) {
+    auto bencode_value = BencodeParser::parse(data);
+    if (!std::holds_alternative<std::unique_ptr<BencodeDict>>(bencode_value)) {
+        throw std::runtime_error("Invalid torrent data: root must be a dictionary");
+    }
+
+    return parse_from_bencode(*std::get<std::unique_ptr<BencodeDict>>(bencode_value));
+}
+
 TorrentMetadata TorrentMetadataParser::parse_from_bencode(const BencodeDict& dict) {
     TorrentMetadata metadata;
 

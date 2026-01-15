@@ -62,7 +62,6 @@ private:
     std::string generate_accept_key(const std::string& key);
 
     int port_;
-    HttpServer http_server_;
     std::unordered_set<std::unique_ptr<WebSocketConnection>> connections_;
     std::mutex connections_mutex_;
     MessageHandler message_handler_;

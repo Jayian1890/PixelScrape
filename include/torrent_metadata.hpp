@@ -34,6 +34,7 @@ struct TorrentMetadata {
 class TorrentMetadataParser {
 public:
     static TorrentMetadata parse(const std::filesystem::path& torrent_path);
+    static TorrentMetadata parse(const std::string& data);
 
 private:
     static TorrentMetadata parse_from_bencode(const BencodeDict& dict);

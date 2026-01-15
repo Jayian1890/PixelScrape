@@ -1,6 +1,7 @@
 #include "torrent_manager.hpp"
 #include "http_server.hpp"
 #include "websocket_server.hpp"
+#include "transmission_rpc.hpp"
 #include <logging.hpp>
 #include <filesystem>
 #include <iostream>
@@ -13,10 +14,13 @@ namespace fs = std::filesystem;
 volatile std::atomic<bool> running{true};
 
 void signal_handler(int signal) {
+    (void)signal;
     running = false;
 }
 
 int main(int argc, char* argv[]) {
+    (void)argc;
+    (void)argv;
     // Set up signal handlers
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
@@ -45,13 +49,16 @@ int main(int argc, char* argv[]) {
         // Initialize torrent manager
         pixelscrape::TorrentManager torrent_manager(download_dir, state_dir);
 
+        // Initialize Transmission RPC handler
+        pixelscrape::TransmissionRpcHandler transmission_handler(torrent_manager);
+
         // Initialize HTTP server
         pixelscrape::HttpServer http_server(8080);
 
         // API endpoints
 
         // Serve the web UI
-        http_server.add_route("GET", "/", [](const pixelscrape::HttpRequest& req) {
+        http_server.add_route("GET", "/", [](const pixelscrape::HttpRequest&) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "text/html";
 
@@ -69,7 +76,11 @@ int main(int argc, char* argv[]) {
 
             return response;
         });
-        http_server.add_route("GET", "/api/torrents", [&torrent_manager](const pixelscrape::HttpRequest& req) {
+        http_server.add_route("POST", "/transmission/rpc", [&transmission_handler](const pixelscrape::HttpRequest& req) {
+            return transmission_handler.handle_request(req);
+        });
+
+        http_server.add_route("GET", "/api/torrents", [&torrent_manager](const pixelscrape::HttpRequest&) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "application/json";
             response.headers["Access-Control-Allow-Origin"] = "*";
@@ -84,7 +95,9 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            response.body = torrent_array.stringify(pixellib::core::json::StringifyOptions{.pretty = true});
+            pixellib::core::json::StringifyOptions options;
+            options.pretty = true;
+            response.body = torrent_array.stringify(options);
             return response;
         });
 
@@ -94,18 +107,12 @@ int main(int argc, char* argv[]) {
             response.headers["Access-Control-Allow-Origin"] = "*";
 
             try {
-                // Parse JSON body for torrent path and file priorities
                 auto json_value = pixellib::core::json::JSON::parse_or_throw(req.body);
                 if (!json_value.is_object()) {
                     throw std::runtime_error("Invalid JSON");
                 }
 
-                auto path_it = json_value.find("path");
-                if (!path_it || !path_it->is_string()) {
-                    throw std::runtime_error("Missing torrent path");
-                }
-
-                std::string torrent_path = path_it->as_string();
+                std::string torrent_id;
                 std::vector<size_t> file_priorities;
 
                 auto priorities_it = json_value.find("file_priorities");
@@ -118,19 +125,58 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                std::string torrent_id = torrent_manager.add_torrent(torrent_path, file_priorities);
+                auto metainfo_it = json_value.find("metainfo");
+                auto path_it = json_value.find("path");
+
+                if (metainfo_it && metainfo_it->is_string()) {
+                    // Simple base64 decode
+                    static const std::string base64_chars = 
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                        "abcdefghijklmnopqrstuvwxyz"
+                        "0123456789+/";
+                    
+                    auto decode = [](const std::string& in) {
+                        std::string out;
+                        std::vector<int> T(256, -1);
+                        for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+                        int val = 0, valb = -8;
+                        for (unsigned char c : in) {
+                            if (T[c] == -1) continue;
+                            val = (val << 6) + T[c];
+                            valb += 6;
+                            if (valb >= 0) {
+                                out.push_back(char((val >> valb) & 0xFF));
+                                valb -= 8;
+                            }
+                        }
+                        return out;
+                    };
+
+                    std::string decoded_data = decode(metainfo_it->as_string());
+                    torrent_id = torrent_manager.add_torrent_data(decoded_data, file_priorities);
+                } else if (path_it && path_it->is_string()) {
+                    torrent_id = torrent_manager.add_torrent(path_it->as_string(), file_priorities);
+                } else {
+                    throw std::runtime_error("Missing torrent path or metainfo");
+                }
 
                 pixellib::core::json::JSON result = pixellib::core::json::JSON::object({});
                 result["success"] = pixellib::core::json::JSON(true);
                 result["torrent_id"] = pixellib::core::json::JSON(torrent_id);
-                response.body = result.stringify(pixellib::core::json::StringifyOptions{.pretty = true});
+                
+                pixellib::core::json::StringifyOptions options;
+                options.pretty = true;
+                response.body = result.stringify(options);
 
             } catch (const std::exception& e) {
                 response.status_code = 400;
                 pixellib::core::json::JSON error = pixellib::core::json::JSON::object({});
                 error["success"] = pixellib::core::json::JSON(false);
                 error["error"] = pixellib::core::json::JSON(e.what());
-                response.body = error.stringify(pixellib::core::json::StringifyOptions{.pretty = true});
+                
+                pixellib::core::json::StringifyOptions options;
+                options.pretty = true;
+                response.body = error.stringify(options);
             }
 
             return response;
@@ -150,7 +196,10 @@ int main(int argc, char* argv[]) {
                 bool success = torrent_manager.remove_torrent(torrent_id);
                 pixellib::core::json::JSON result = pixellib::core::json::JSON::object({});
                 result["success"] = pixellib::core::json::JSON(success);
-                response.body = result.stringify(pixellib::core::json::StringifyOptions{.pretty = true});
+                
+                pixellib::core::json::StringifyOptions options;
+                options.pretty = true;
+                response.body = result.stringify(options);
 
                 if (!success) {
                     response.status_code = 404;
@@ -162,13 +211,15 @@ int main(int argc, char* argv[]) {
             return response;
         });
 
-        http_server.add_route("GET", "/api/stats", [&torrent_manager](const pixelscrape::HttpRequest& req) {
+        http_server.add_route("GET", "/api/stats", [&torrent_manager](const pixelscrape::HttpRequest&) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "application/json";
             response.headers["Access-Control-Allow-Origin"] = "*";
 
             auto stats = torrent_manager.get_global_stats();
-            response.body = stats.stringify(pixellib::core::json::StringifyOptions{.pretty = true});
+            pixellib::core::json::StringifyOptions options;
+            options.pretty = true;
+            response.body = stats.stringify(options);
             return response;
         });
 
@@ -190,13 +241,23 @@ int main(int argc, char* argv[]) {
         while (running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
 
-            // Broadcast stats every 5 seconds
-            static int counter = 0;
-            if (++counter % 5 == 0) {
-                auto stats = torrent_manager.get_global_stats();
-                std::string stats_json = stats.stringify(pixellib::core::json::StringifyOptions{.pretty = false});
-                ws_server.broadcast_text(stats_json);
+            // Broadcast status update
+            pixellib::core::json::JSON update = pixellib::core::json::JSON::object({});
+            update["stats"] = torrent_manager.get_global_stats();
+            
+            auto torrents = torrent_manager.list_torrents();
+            pixellib::core::json::JSON torrent_array = pixellib::core::json::JSON::array({});
+            for (const auto& id : torrents) {
+                auto status = torrent_manager.get_torrent_status(id);
+                if (status) {
+                    torrent_array.push_back(*status);
+                }
             }
+            update["torrents"] = torrent_array;
+
+            pixellib::core::json::StringifyOptions ws_options;
+            ws_options.pretty = false;
+            ws_server.broadcast_text(update.stringify(ws_options));
         }
 
         std::cout << "\nShutting down PixelScrape..." << std::endl;

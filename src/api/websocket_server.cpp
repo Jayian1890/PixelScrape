@@ -170,16 +170,7 @@ void WebSocketConnection::close() {
     }
 }
 
-WebSocketServer::WebSocketServer(int port) : port_(port), http_server_(port), running_(false) {
-    // Set up WebSocket upgrade handler
-    http_server_.add_route("GET", "/ws", [this](const HttpRequest& request) -> HttpResponse {
-        // This would normally upgrade to WebSocket, but we'll handle it in the HTTP server
-        // For simplicity, we'll return a 400 Bad Request and handle upgrade elsewhere
-        HttpResponse response(400, "Bad Request");
-        response.body = "WebSocket upgrade required";
-        return response;
-    });
-}
+WebSocketServer::WebSocketServer(int port) : port_(port), running_(false) {}
 
 WebSocketServer::~WebSocketServer() {
     stop();
@@ -189,13 +180,11 @@ void WebSocketServer::start() {
     if (running_) return;
 
     running_ = true;
-    http_server_.start();
     server_thread_ = std::thread(&WebSocketServer::run, this);
 }
 
 void WebSocketServer::stop() {
     running_ = false;
-    http_server_.stop();
     if (server_thread_.joinable()) {
         server_thread_.join();
     }
@@ -240,12 +229,129 @@ void WebSocketServer::set_message_handler(MessageHandler handler) {
     message_handler_ = handler;
 }
 
-void WebSocketServer::run() {
-    // For this implementation, we'll use a simple approach
-    // In a real implementation, you'd modify the HTTP server to handle WebSocket upgrades
-    while (running_) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+void WebSocketServer::handle_websocket_upgrade(const HttpRequest& request, int client_socket) {
+    auto key_it = request.headers.find("Sec-WebSocket-Key");
+    if (key_it == request.headers.end()) {
+        close(client_socket);
+        return;
     }
+
+    std::string accept_key = generate_accept_key(key_it->second);
+
+    std::stringstream ss;
+    ss << "HTTP/1.1 101 Switching Protocols\r\n";
+    ss << "Upgrade: websocket\r\n";
+    ss << "Connection: Upgrade\r\n";
+    ss << "Sec-WebSocket-Accept: " << accept_key << "\r\n";
+    ss << "\r\n";
+
+    std::string handshake = ss.str();
+    send(client_socket, handshake.data(), handshake.size(), 0);
+
+    auto connection = std::make_unique<WebSocketConnection>(client_socket);
+    std::thread(&WebSocketServer::handle_websocket_connection, this, std::move(connection)).detach();
+}
+
+void WebSocketServer::handle_websocket_connection(std::unique_ptr<WebSocketConnection> connection) {
+    WebSocketConnection* conn_ptr = connection.get();
+    {
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        connections_.insert(std::move(connection));
+    }
+
+    while (running_ && conn_ptr->is_connected()) {
+        auto frame = conn_ptr->receive_frame();
+        if (frame) {
+            if (message_handler_) {
+                message_handler_(conn_ptr, *frame);
+            }
+            if (frame->opcode == WebSocketFrame::CLOSE) {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(connections_mutex_);
+    for (auto it = connections_.begin(); it != connections_.end(); ++it) {
+        if (it->get() == conn_ptr) {
+            connections_.erase(it);
+            break;
+        }
+    }
+}
+
+void WebSocketServer::run() {
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) return;
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port_);
+
+    if (bind(server_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(server_fd);
+        return;
+    }
+
+    if (listen(server_fd, 10) < 0) {
+        close(server_fd);
+        return;
+    }
+
+    while (running_) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(server_fd, &read_fds);
+
+        timeval timeout{0, 100000}; // 100ms
+        int activity = select(server_fd + 1, &read_fds, nullptr, nullptr, &timeout);
+
+        if (activity > 0 && FD_ISSET(server_fd, &read_fds)) {
+            sockaddr_in client_addr{};
+            socklen_t client_len = sizeof(client_addr);
+            int client_socket = accept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+            if (client_socket >= 0) {
+                // Read handshake request manually for now because http_server_ closes it
+                char buffer[4096];
+                ssize_t received = recv(client_socket, buffer, sizeof(buffer), 0);
+                if (received > 0) {
+                    std::string request_str(buffer, received);
+                    HttpRequest request;
+                    
+                    std::istringstream iss(request_str);
+                    std::string line;
+                    std::getline(iss, line);
+                    if (line.back() == '\r') line.pop_back();
+                    
+                    std::istringstream line_iss(line);
+                    line_iss >> request.method >> request.path;
+                    
+                    while (std::getline(iss, line) && line != "\r" && !line.empty()) {
+                        if (line.back() == '\r') line.pop_back();
+                        size_t colon = line.find(':');
+                        if (colon != std::string::npos) {
+                            std::string key = line.substr(0, colon);
+                            std::string val = line.substr(colon + 1);
+                            // Trim
+                            val.erase(0, val.find_first_not_of(" "));
+                            request.headers[key] = val;
+                        }
+                    }
+                    
+                    handle_websocket_upgrade(request, client_socket);
+                } else {
+                    close(client_socket);
+                }
+            }
+        }
+    }
+    close(server_fd);
 }
 
 std::string WebSocketServer::generate_accept_key(const std::string& key) {

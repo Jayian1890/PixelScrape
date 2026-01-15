@@ -2,7 +2,6 @@
 #include <json.hpp>
 #include <random>
 #include <chrono>
-#include <algorithm>
 
 namespace pixelscrape {
 
@@ -15,6 +14,9 @@ TorrentManager::~TorrentManager() {
         if (pair.second->tracker_thread.joinable()) {
             pair.second->tracker_thread.join();
         }
+        if (pair.second->peer_thread.joinable()) {
+            pair.second->peer_thread.join();
+        }
     }
     torrents_.clear();
 }
@@ -22,11 +24,21 @@ TorrentManager::~TorrentManager() {
 std::string TorrentManager::add_torrent(const std::filesystem::path& torrent_path,
                                        const std::vector<size_t>& file_priorities) {
     auto metadata = TorrentMetadataParser::parse(torrent_path);
+    return add_torrent_impl(std::move(metadata), file_priorities);
+}
+
+std::string TorrentManager::add_torrent_data(const std::string& data,
+                                            const std::vector<size_t>& file_priorities) {
+    auto metadata = TorrentMetadataParser::parse(data);
+    return add_torrent_impl(std::move(metadata), file_priorities);
+}
+
+std::string TorrentManager::add_torrent_impl(TorrentMetadata metadata,
+                                            const std::vector<size_t>& file_priorities) {
     std::string info_hash_hex = StateManager::info_hash_to_hex(metadata.info_hash);
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // Check if already exists
     if (torrents_.find(info_hash_hex) != torrents_.end()) {
         throw std::runtime_error("Torrent already exists");
     }
@@ -37,15 +49,13 @@ std::string TorrentManager::add_torrent(const std::filesystem::path& torrent_pat
     torrent->tracker = std::make_unique<TrackerClient>(torrent->metadata);
     torrent->piece_manager = std::make_unique<PieceManager>(torrent->metadata, download_dir_);
 
-    // Set file priorities
     if (file_priorities.empty()) {
-        torrent->file_priorities.assign(torrent->metadata.files.size(), 1); // Normal priority
+        torrent->file_priorities.assign(torrent->metadata.files.size(), 1);
     } else {
         torrent->file_priorities = file_priorities;
-        torrent->file_priorities.resize(torrent->metadata.files.size(), 0); // Skip by default
+        torrent->file_priorities.resize(torrent->metadata.files.size(), 0);
     }
 
-    // Load saved state if exists
     auto saved_state = state_manager_.load_state(info_hash_hex);
     if (saved_state) {
         torrent->piece_manager->load_state(saved_state->bitfield);
@@ -56,8 +66,8 @@ std::string TorrentManager::add_torrent(const std::filesystem::path& torrent_pat
         }
     }
 
-    // Start tracker thread
     torrent->tracker_thread = std::thread(&TorrentManager::tracker_worker, this, info_hash_hex);
+    torrent->peer_thread = std::thread(&TorrentManager::peer_worker, this, info_hash_hex);
 
     torrents_[info_hash_hex] = std::move(torrent);
     return info_hash_hex;
@@ -85,6 +95,9 @@ bool TorrentManager::remove_torrent(const std::string& torrent_id) {
     // Stop threads
     if (it->second->tracker_thread.joinable()) {
         it->second->tracker_thread.join();
+    }
+    if (it->second->peer_thread.joinable()) {
+        it->second->peer_thread.join();
     }
 
     torrents_.erase(it);
@@ -208,11 +221,17 @@ void TorrentManager::tracker_worker(const std::string& torrent_id) {
                     "" // No event for now
                 );
 
-                // Update peers (simplified - in real implementation would manage peer connections)
-                torrent->peers.clear();
                 for (const auto& peer_info : peers) {
-                    // Create peer connections here
-                    // This is simplified for the basic implementation
+                    bool known = false;
+                    for (const auto& existing : torrent->discovered_peers) {
+                        if (existing.ip == peer_info.ip && existing.port == peer_info.port) {
+                            known = true;
+                            break;
+                        }
+                    }
+                    if (!known) {
+                        torrent->discovered_peers.push_back(peer_info);
+                    }
                 }
 
             } catch (const std::exception& e) {
@@ -225,7 +244,7 @@ void TorrentManager::tracker_worker(const std::string& torrent_id) {
 }
 
 void TorrentManager::peer_worker(const std::string& torrent_id) {
-    // Peer management would go here
+    //TODO: Peer management would go here
     // This is a placeholder for the full implementation
 }
 
