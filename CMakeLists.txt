@@ -14,13 +14,13 @@ endif()
 # Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib/third-party
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib
 )
 
 # Source files
 set(SOURCES
     src/main.cpp
+    src/torrent_manager.cpp
     src/bencode/parser.cpp
     src/crypto/sha1.cpp
     src/torrent/metadata.cpp
@@ -42,6 +42,9 @@ target_compile_options(pixelscrape PRIVATE
     -Wpedantic
     -O2
 )
+
+# Define DOCTEST_CONFIG_DISABLE to disable doctest in release builds
+target_compile_definitions(pixelscrape PRIVATE DOCTEST_CONFIG_DISABLE)
 
 # Link libraries (none needed for pixelLib as it's header-only)
 # target_link_libraries(pixelscrape ...)

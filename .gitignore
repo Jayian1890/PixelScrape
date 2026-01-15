@@ -67,3 +67,4 @@ downloads/
 
 # OS files
 Thumbs.db
+external/doctest/doctest.h

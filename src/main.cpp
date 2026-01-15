@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <iostream>
 #include <csignal>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
@@ -21,14 +22,22 @@ int main(int argc, char* argv[]) {
 
     // Initialize logging
     pixellib::core::logging::Logger::set_level(pixellib::core::logging::LOG_DEBUG);
-    pixellib::core::logging::Logger::set_file_logging("pixelscrape.log", 10 * 1024 * 1024, 5); // 10MB, 5 files
+    const char* home_env = std::getenv("HOME");
+    if (!home_env) {
+        throw std::runtime_error("HOME environment variable not set");
+    }
+    fs::path config_dir = fs::path(home_env) / ".config" / "pixelscrape";
+    fs::create_directories(config_dir);
+    std::string log_file = (config_dir / "pixelscrape.log").string();
+    pixellib::core::logging::Logger::set_file_logging(log_file, 10 * 1024 * 1024, 5); // 10MB, 5 files
 
+    std::cout << "Starting PixelScrape Torrent Client..." << std::endl;
     pixellib::core::logging::Logger::info("Starting PixelScrape Torrent Client");
 
     try {
         // Create directories
         fs::path download_dir = "downloads";
-        fs::path state_dir = ".torrents/state";
+        fs::path state_dir = config_dir / "state";
         fs::create_directories(download_dir);
         fs::create_directories(state_dir);
 
@@ -42,6 +51,7 @@ int main(int argc, char* argv[]) {
         http_server.add_route("GET", "/api/torrents", [&torrent_manager](const pixelscrape::HttpRequest& req) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "application/json";
+            response.headers["Access-Control-Allow-Origin"] = "*";
 
             auto torrents = torrent_manager.list_torrents();
             pixellib::core::json::JSON torrent_array = pixellib::core::json::JSON::array({});
@@ -60,6 +70,7 @@ int main(int argc, char* argv[]) {
         http_server.add_route("POST", "/api/torrents", [&torrent_manager](const pixelscrape::HttpRequest& req) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "application/json";
+            response.headers["Access-Control-Allow-Origin"] = "*";
 
             try {
                 // Parse JSON body for torrent path and file priorities
@@ -107,6 +118,7 @@ int main(int argc, char* argv[]) {
         http_server.add_route("DELETE", "/api/torrents/{id}", [&torrent_manager](const pixelscrape::HttpRequest& req) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "application/json";
+            response.headers["Access-Control-Allow-Origin"] = "*";
 
             // Extract torrent ID from path (simplified)
             std::string path = req.path;
@@ -132,6 +144,7 @@ int main(int argc, char* argv[]) {
         http_server.add_route("GET", "/api/stats", [&torrent_manager](const pixelscrape::HttpRequest& req) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "application/json";
+            response.headers["Access-Control-Allow-Origin"] = "*";
 
             auto stats = torrent_manager.get_global_stats();
             response.body = stats.stringify(pixellib::core::json::StringifyOptions{.pretty = true});
@@ -145,6 +158,11 @@ int main(int argc, char* argv[]) {
         http_server.start();
         ws_server.start();
 
+        std::cout << "\nPixelScrape started successfully!" << std::endl;
+        std::cout << "HTTP API available at: http://localhost:8080" << std::endl;
+        std::cout << "WebSocket available at: ws://localhost:8081" << std::endl;
+        std::cout << "Press Ctrl+C to stop...\n" << std::endl;
+        
         pixellib::core::logging::Logger::info("PixelScrape started - HTTP server on port 8080, WebSocket on port 8081");
 
         // Main loop
@@ -160,6 +178,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        std::cout << "\nShutting down PixelScrape..." << std::endl;
         pixellib::core::logging::Logger::info("Shutting down PixelScrape");
 
         // Stop servers
@@ -167,6 +186,7 @@ int main(int argc, char* argv[]) {
         http_server.stop();
 
     } catch (const std::exception& e) {
+        std::cerr << "\nFatal error: " << e.what() << std::endl;
         pixellib::core::logging::Logger::error("Fatal error: {}", e.what());
         return 1;
     }
