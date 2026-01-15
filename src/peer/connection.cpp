@@ -230,7 +230,6 @@ void PeerConnection::handle_message(const PeerMessage& message) {
                 }
             }
             break;
-        }
         case PeerMessageType::CANCEL:
             // Handle cancel requests
             break;
