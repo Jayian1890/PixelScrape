@@ -17,6 +17,7 @@ struct TorrentFile {
 
 struct TorrentMetadata {
     std::string announce;
+    std::vector<std::vector<std::string>> announce_list;
     std::array<uint8_t, SHA1::HASH_SIZE> info_hash;
     std::string name;
     size_t piece_length;

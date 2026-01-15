@@ -208,6 +208,15 @@ void PeerConnection::handle_message(const PeerMessage& message) {
             break;
         case PeerMessageType::PIECE:
             // Handle received piece blocks
+            if (message.payload.size() >= 8) {
+                uint32_t index = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data()));
+                uint32_t begin = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data() + 4));
+                std::vector<uint8_t> data(message.payload.begin() + 8, message.payload.end());
+
+                if (piece_callback_) {
+                    piece_callback_(index, begin, data);
+                }
+            }
             break;
         case PeerMessageType::CANCEL:
             // Handle cancel requests

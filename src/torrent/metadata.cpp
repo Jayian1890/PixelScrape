@@ -43,6 +43,31 @@ TorrentMetadata TorrentMetadataParser::parse_from_bencode(const BencodeDict& dic
     }
     metadata.announce = std::get<BencodeString>(announce_it->second);
 
+    // Extract announce-list
+    auto announce_list_it = dict.values.find("announce-list");
+    if (announce_list_it != dict.values.end() && std::holds_alternative<std::unique_ptr<BencodeList>>(announce_list_it->second)) {
+        const auto& tiers_list = *std::get<std::unique_ptr<BencodeList>>(announce_list_it->second);
+        for (const auto& tier_value : tiers_list.items) {
+            if (std::holds_alternative<std::unique_ptr<BencodeList>>(tier_value)) {
+                std::vector<std::string> tier;
+                const auto& urls_list = *std::get<std::unique_ptr<BencodeList>>(tier_value);
+                for (const auto& url_value : urls_list.items) {
+                    if (std::holds_alternative<BencodeString>(url_value)) {
+                        tier.push_back(std::get<BencodeString>(url_value));
+                    }
+                }
+                if (!tier.empty()) {
+                    metadata.announce_list.push_back(tier);
+                }
+            }
+        }
+    }
+
+    // Default announce list if empty
+    if (metadata.announce_list.empty()) {
+        metadata.announce_list.push_back({metadata.announce});
+    }
+
     // Extract info dictionary
     auto info_it = dict.values.find("info");
     if (info_it == dict.values.end() || !std::holds_alternative<std::unique_ptr<BencodeDict>>(info_it->second)) {

@@ -17,53 +17,64 @@ std::vector<PeerInfo> TrackerClient::get_peers(
     size_t left,
     const std::string& event
 ) {
-    std::string url = build_tracker_url(peer_id, port, uploaded, downloaded, left, event);
+    std::string last_error;
 
-    try {
-        auto response = pixellib::core::network::Network::http_get(url);
-        if (response.empty()) {
-            throw std::runtime_error("Empty tracker response");
+    for (const auto& tier : metadata_.announce_list) {
+        for (const auto& tracker_url : tier) {
+            try {
+                if (tracker_url.substr(0, 4) != "http") continue; // Only support HTTP for now
+
+                std::string url = build_tracker_url(tracker_url, peer_id, port, uploaded, downloaded, left, event);
+
+                auto response = pixellib::core::network::Network::http_get(url);
+                if (response.empty()) {
+                    throw std::runtime_error("Empty tracker response");
+                }
+
+                // Parse HTTP response to extract body
+                size_t body_start = response.find("\r\n\r\n");
+                if (body_start == std::string::npos) {
+                    throw std::runtime_error("Invalid HTTP response format");
+                }
+                std::string body = response.substr(body_start + 4);
+
+                auto bencode_value = BencodeParser::parse(body);
+                if (!std::holds_alternative<std::unique_ptr<BencodeDict>>(bencode_value)) {
+                    throw std::runtime_error("Invalid tracker response: not a dictionary");
+                }
+
+                const auto& response_dict = *std::get<std::unique_ptr<BencodeDict>>(bencode_value);
+
+                // Check for failure reason
+                auto failure_it = response_dict.values.find("failure reason");
+                if (failure_it != response_dict.values.end() && std::holds_alternative<BencodeString>(failure_it->second)) {
+                    throw std::runtime_error("Tracker failure: " + std::get<BencodeString>(failure_it->second));
+                }
+
+                // Extract peers
+                auto peers_it = response_dict.values.find("peers");
+                if (peers_it == response_dict.values.end()) {
+                    throw std::runtime_error("No peers in tracker response");
+                }
+
+                if (std::holds_alternative<BencodeString>(peers_it->second)) {
+                    // Compact peer list
+                    return parse_compact_peers(std::get<BencodeString>(peers_it->second));
+                } else {
+                    throw std::runtime_error("Unsupported peer format (only compact format supported)");
+                }
+            } catch (const std::exception& e) {
+                last_error = e.what();
+                // Continue to next tracker
+            }
         }
-
-        // Parse HTTP response to extract body
-        size_t body_start = response.find("\r\n\r\n");
-        if (body_start == std::string::npos) {
-            throw std::runtime_error("Invalid HTTP response format");
-        }
-        std::string body = response.substr(body_start + 4);
-
-        auto bencode_value = BencodeParser::parse(body);
-        if (!std::holds_alternative<std::unique_ptr<BencodeDict>>(bencode_value)) {
-            throw std::runtime_error("Invalid tracker response: not a dictionary");
-        }
-
-        const auto& response_dict = *std::get<std::unique_ptr<BencodeDict>>(bencode_value);
-
-        // Check for failure reason
-        auto failure_it = response_dict.values.find("failure reason");
-        if (failure_it != response_dict.values.end() && std::holds_alternative<BencodeString>(failure_it->second)) {
-            throw std::runtime_error("Tracker failure: " + std::get<BencodeString>(failure_it->second));
-        }
-
-        // Extract peers
-        auto peers_it = response_dict.values.find("peers");
-        if (peers_it == response_dict.values.end()) {
-            throw std::runtime_error("No peers in tracker response");
-        }
-
-        if (std::holds_alternative<BencodeString>(peers_it->second)) {
-            // Compact peer list
-            return parse_compact_peers(std::get<BencodeString>(peers_it->second));
-        } else {
-            throw std::runtime_error("Unsupported peer format (only compact format supported)");
-        }
-
-    } catch (const std::exception& e) {
-        throw std::runtime_error("Tracker request failed: " + std::string(e.what()));
     }
+
+    throw std::runtime_error("All trackers failed. Last error: " + last_error);
 }
 
 std::string TrackerClient::build_tracker_url(
+    const std::string& base_url,
     const std::array<uint8_t, 20>& peer_id,
     uint16_t port,
     size_t uploaded,
@@ -72,7 +83,7 @@ std::string TrackerClient::build_tracker_url(
     const std::string& event
 ) const {
     std::stringstream url;
-    url << metadata_.announce;
+    url << base_url;
 
     // Add query parameters
     url << "?info_hash=" << url_encode(std::string(reinterpret_cast<const char*>(metadata_.info_hash.data()), 20));

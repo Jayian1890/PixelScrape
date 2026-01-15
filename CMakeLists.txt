@@ -14,8 +14,8 @@ endif()
 # Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/doctest
-    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/doctest
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib/include
 )
 
 # Source files
@@ -50,7 +50,8 @@ target_compile_definitions(pixelscrape PRIVATE DOCTEST_CONFIG_DISABLE)
 
 # Link libraries (none needed for pixelLib as it's header-only)
 # target_link_libraries(pixelscrape ...)
-target_link_libraries(pixelscrape c++)
+# target_link_libraries(pixelscrape c++) # This line is incorrect, removing it
+target_link_libraries(pixelscrape pthread)
 
 # Install targets
 install(TARGETS pixelscrape DESTINATION bin)

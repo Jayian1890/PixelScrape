@@ -31,6 +31,7 @@ public:
 
 private:
     std::string build_tracker_url(
+        const std::string& base_url,
         const std::array<uint8_t, 20>& peer_id,
         uint16_t port,
         size_t uploaded,
