@@ -18,7 +18,7 @@ struct Torrent {
     TorrentMetadata metadata;
     std::unique_ptr<TrackerClient> tracker;
     std::unique_ptr<PieceManager> piece_manager;
-    std::vector<std::unique_ptr<PeerConnection>> peers;
+    std::vector<std::shared_ptr<PeerConnection>> peers;
     std::vector<PeerInfo> discovered_peers;
     std::array<uint8_t, 20> peer_id;
     std::thread tracker_thread;
@@ -32,6 +32,10 @@ struct Torrent {
     std::chrono::steady_clock::time_point last_speed_update{std::chrono::steady_clock::now()};
     std::vector<size_t> file_priorities;
     bool paused{false};
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool stopping{false};
 };
 
 class TorrentManager {

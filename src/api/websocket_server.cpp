@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <sstream>
 
 namespace pixelscrape {
 
@@ -248,15 +249,15 @@ void WebSocketServer::handle_websocket_upgrade(const HttpRequest& request, int c
     std::string handshake = ss.str();
     send(client_socket, handshake.data(), handshake.size(), 0);
 
-    auto connection = std::make_unique<WebSocketConnection>(client_socket);
-    std::thread(&WebSocketServer::handle_websocket_connection, this, std::move(connection)).detach();
+    auto connection = std::make_shared<WebSocketConnection>(client_socket);
+    std::thread(&WebSocketServer::handle_websocket_connection, this, connection).detach();
 }
 
-void WebSocketServer::handle_websocket_connection(std::unique_ptr<WebSocketConnection> connection) {
+void WebSocketServer::handle_websocket_connection(std::shared_ptr<WebSocketConnection> connection) {
     WebSocketConnection* conn_ptr = connection.get();
     {
         std::lock_guard<std::mutex> lock(connections_mutex_);
-        connections_.insert(std::move(connection));
+        connections_.insert(connection);
     }
 
     while (running_ && conn_ptr->is_connected()) {

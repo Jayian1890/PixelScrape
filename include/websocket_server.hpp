@@ -5,6 +5,8 @@
 #include <mutex>
 #include <optional>
 #include <functional>
+#include <memory>
+#include <atomic>
 
 namespace pixelscrape {
 
@@ -58,11 +60,11 @@ public:
 private:
     void run();
     void handle_websocket_upgrade(const HttpRequest& request, int client_socket);
-    void handle_websocket_connection(std::unique_ptr<WebSocketConnection> connection);
+    void handle_websocket_connection(std::shared_ptr<WebSocketConnection> connection);
     std::string generate_accept_key(const std::string& key);
 
     int port_;
-    std::unordered_set<std::unique_ptr<WebSocketConnection>> connections_;
+    std::unordered_set<std::shared_ptr<WebSocketConnection>> connections_;
     std::mutex connections_mutex_;
     MessageHandler message_handler_;
     std::thread server_thread_;

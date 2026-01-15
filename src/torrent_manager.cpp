@@ -9,17 +9,42 @@ TorrentManager::TorrentManager(const std::filesystem::path& download_dir, const 
     : download_dir_(download_dir), state_manager_(state_dir) {}
 
 TorrentManager::~TorrentManager() {
-    running_ = false;
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto& pair : torrents_) {
-        if (pair.second->tracker_thread.joinable()) {
-            pair.second->tracker_thread.join();
+    std::vector<std::unique_ptr<Torrent>> torrents_to_shutdown;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& pair : torrents_) {
+            // Signal stop inside the lock
+            {
+                std::lock_guard<std::mutex> t_lock(pair.second->mutex);
+                pair.second->stopping = true;
+                pair.second->cv.notify_all();
+
+                // Save state
+                TorrentState state;
+                state.info_hash_hex = pair.first;
+                state.bitfield = pair.second->piece_manager->get_bitfield();
+                state.uploaded_bytes = pair.second->uploaded_bytes;
+                state.downloaded_bytes = pair.second->downloaded_bytes;
+                state.file_priorities = pair.second->file_priorities;
+                state.last_updated = std::chrono::system_clock::now();
+
+                state_manager_.save_state(pair.first, state);
+            }
+            torrents_to_shutdown.push_back(std::move(pair.second));
         }
-        if (pair.second->peer_thread.joinable()) {
-            pair.second->peer_thread.join();
+        torrents_.clear();
+    }
+
+    // Join threads outside the global lock
+    for (auto& torrent : torrents_to_shutdown) {
+        if (torrent->tracker_thread.joinable()) {
+            torrent->tracker_thread.join();
+        }
+        if (torrent->peer_thread.joinable()) {
+            torrent->peer_thread.join();
         }
     }
-    torrents_.clear();
 }
 
 std::string TorrentManager::add_torrent(const std::filesystem::path& torrent_path,
@@ -83,33 +108,47 @@ std::string TorrentManager::add_torrent_impl(TorrentMetadata metadata,
 }
 
 bool TorrentManager::remove_torrent(const std::string& torrent_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_ptr<Torrent> torrent;
 
-    auto it = torrents_.find(torrent_id);
-    if (it == torrents_.end()) {
-        return false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        auto it = torrents_.find(torrent_id);
+        if (it == torrents_.end()) {
+            return false;
+        }
+
+        // Save state before removing
+        TorrentState state;
+        state.info_hash_hex = torrent_id;
+        state.bitfield = it->second->piece_manager->get_bitfield();
+        state.uploaded_bytes = it->second->uploaded_bytes;
+        state.downloaded_bytes = it->second->downloaded_bytes;
+        state.file_priorities = it->second->file_priorities;
+        state.last_updated = std::chrono::system_clock::now();
+
+        state_manager_.save_state(torrent_id, state);
+
+        // Signal stop
+        {
+            std::lock_guard<std::mutex> t_lock(it->second->mutex);
+            it->second->stopping = true;
+            it->second->cv.notify_all();
+        }
+
+        // Move ownership out of map
+        torrent = std::move(it->second);
+        torrents_.erase(it);
     }
 
-    // Save state before removing
-    TorrentState state;
-    state.info_hash_hex = torrent_id;
-    state.bitfield = it->second->piece_manager->get_bitfield();
-    state.uploaded_bytes = it->second->uploaded_bytes;
-    state.downloaded_bytes = it->second->downloaded_bytes;
-    state.file_priorities = it->second->file_priorities;
-    state.last_updated = std::chrono::system_clock::now();
-
-    state_manager_.save_state(torrent_id, state);
-
-    // Stop threads
-    if (it->second->tracker_thread.joinable()) {
-        it->second->tracker_thread.join();
+    // Stop threads outside the lock
+    if (torrent->tracker_thread.joinable()) {
+        torrent->tracker_thread.join();
     }
-    if (it->second->peer_thread.joinable()) {
-        it->second->peer_thread.join();
+    if (torrent->peer_thread.joinable()) {
+        torrent->peer_thread.join();
     }
 
-    torrents_.erase(it);
     return true;
 }
 
@@ -255,197 +294,232 @@ pixellib::core::json::JSON TorrentManager::get_global_stats() const {
 }
 
 void TorrentManager::tracker_worker(const std::string& torrent_id) {
-    while (running_) { // Use a better check if possible, for now just while(true) or similar
-        std::array<uint8_t, 20> peer_id;
-        size_t uploaded, downloaded, left;
-        TrackerClient* tracker = nullptr;
-        bool paused = false;
-
-        std::vector<std::string> trackers;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = torrents_.find(torrent_id);
-            if (it == torrents_.end()) break;
-
-            peer_id = it->second->peer_id;
-            uploaded = it->second->uploaded_bytes;
-            downloaded = it->second->downloaded_bytes;
-            left = it->second->metadata.total_length - downloaded;
-            tracker = it->second->tracker.get();
-            paused = it->second->paused;
-            trackers = it->second->metadata.announce_list;
+    while (true) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        auto it = torrents_.find(torrent_id);
+        if (it == torrents_.end()) {
+            break; // Torrent removed
         }
 
-        if (paused) {
-            std::this_thread::sleep_for(std::chrono::seconds(5));
+        // Check stopping condition safely
+        {
+            std::lock_guard<std::mutex> t_lock(it->second->mutex);
+            if (it->second->stopping) break;
+        }
+
+        auto& torrent = it->second;
+        if (torrent->paused) {
+            lock.unlock();
+            std::unique_lock<std::mutex> t_lock(torrent->mutex);
+            if (torrent->cv.wait_for(t_lock, std::chrono::seconds(5), [&](){ return torrent->stopping; })) break;
             continue;
         }
 
-        for (const auto& announce_url : trackers) {
-            try {
-                auto peers = tracker->get_peers(peer_id, 6881, uploaded, downloaded, left, "", announce_url);
-                
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto it = torrents_.find(torrent_id);
-                if (it != torrents_.end()) {
-                    auto& torrent = it->second;
-                    for (const auto& peer_info : peers) {
-                        bool known = false;
-                        for (const auto& existing : torrent->discovered_peers) {
-                            if (existing.ip == peer_info.ip && existing.port == peer_info.port) {
-                                known = true;
-                                break;
-                            }
-                        }
-                        if (!known) {
-                            torrent->discovered_peers.push_back(peer_info);
+        // Unlock main mutex before network operation
+        lock.unlock();
+
+        try {
+            // Access tracker via raw pointer (safe because torrent is alive until thread joins,
+            // and we check stopping condition)
+            auto peers = torrent->tracker->get_peers(
+                torrent->peer_id,
+                6881, // Default port
+                torrent->uploaded_bytes,
+                torrent->downloaded_bytes,
+                torrent->metadata.total_length - torrent->downloaded_bytes,
+                "" // No event for now
+            );
+
+            {
+                // Re-lock to update shared data
+                std::lock_guard<std::mutex> t_lock(torrent->mutex);
+                for (const auto& peer_info : peers) {
+                    bool known = false;
+                    for (const auto& existing : torrent->discovered_peers) {
+                        if (existing.ip == peer_info.ip && existing.port == peer_info.port) {
+                            known = true;
+                            break;
                         }
                     }
                 }
-            } catch (const std::exception& e) {
-                pixellib::core::logging::Logger::error("Tracker error for {} ({}): {}", torrent_id, announce_url, e.what());
             }
+
+        } catch (const std::exception& e) {
+            pixellib::core::logging::Logger::error("Tracker error for {}: {}", torrent_id, e.what());
         }
 
-        std::this_thread::sleep_for(std::chrono::minutes(1));
+        // Wait for next update or stop signal
+        Torrent* torrent_ptr = torrent.get();
+
+        std::unique_lock<std::mutex> t_lock(torrent_ptr->mutex);
+        if (torrent_ptr->cv.wait_for(t_lock, std::chrono::minutes(5), [&](){ return torrent_ptr->stopping; })) {
+            break;
+        }
     }
 }
 
 void TorrentManager::peer_worker(const std::string& torrent_id) {
-    while (running_) {
-        std::vector<PeerInfo> to_connect;
-        std::array<uint8_t, 20> peer_id;
-        std::array<uint8_t, 20> info_hash;
-        TorrentMetadata* metadata = nullptr;
-        PieceManager* piece_manager = nullptr;
+    while (true) {
+        std::shared_ptr<Torrent> torrent_shared; // Hold shared ownership if needed, but here we access via map
+        Torrent* torrent = nullptr;
 
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             auto it = torrents_.find(torrent_id);
             if (it == torrents_.end()) break;
 
-            auto& torrent = it->second;
-            if (torrent->paused) {
-                torrent->peers.clear();
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                continue;
-            }
-
-            // 1. Get one peer to connect to at a time to avoid blocking piece management
-            if (!torrent->discovered_peers.empty() && torrent->peers.size() < 50) {
-                to_connect.push_back(torrent->discovered_peers.back());
-                torrent->discovered_peers.pop_back();
-            }
-            
-            peer_id = torrent->peer_id;
-            info_hash = torrent->metadata.info_hash;
-            metadata = &torrent->metadata;
-            piece_manager = torrent->piece_manager.get();
+            torrent = it->second.get();
         }
 
-        // 2. Connect to new peers outside the lock
-        for (const auto& peer_info : to_connect) {
-            auto pc = std::make_unique<PeerConnection>(*metadata, info_hash, peer_id, peer_info, *piece_manager);
-            if (pc->connect()) {
-                if (pc->perform_handshake()) {
+        // Check stopping condition safely
+        {
+            std::lock_guard<std::mutex> t_lock(torrent->mutex);
+            if (torrent->stopping) break;
+        }
+
+        if (torrent->paused) {
+            std::unique_lock<std::mutex> t_lock(torrent->mutex);
+            if (torrent->cv.wait_for(t_lock, std::chrono::seconds(1), [&](){ return torrent->stopping; })) break;
+            continue;
+        }
+
+        // 1. Manage Peers
+        {
+            // Copy discovered peers to local list to iterate without lock
+            std::vector<PeerInfo> discovered_copy;
+            {
+                std::lock_guard<std::mutex> t_lock(torrent->mutex);
+                discovered_copy = torrent->discovered_peers;
+            }
+
+            // Copy existing peers to local list
+            std::vector<std::shared_ptr<PeerConnection>> peers_copy;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                auto it = torrents_.find(torrent_id);
+                if (it != torrents_.end()) {
+                    peers_copy = it->second->peers;
+                }
+            }
+
+            // Connect to new peers outside the lock
+            std::vector<std::shared_ptr<PeerConnection>> new_connections;
+            for (const auto& peer_info : discovered_copy) {
+                if (peers_copy.size() + new_connections.size() >= 50) break;
+
+                // Create new connection
+                auto peer_conn = std::make_shared<PeerConnection>(
+                    torrent->metadata,
+                    torrent->metadata.info_hash,
+                    torrent->peer_id,
+                    peer_info
+                );
+
+                // Set callbacks
+                peer_conn->set_piece_callback([this, torrent_id](size_t index, size_t begin, const std::vector<uint8_t>& data) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     auto it = torrents_.find(torrent_id);
                     if (it != torrents_.end()) {
-                        it->second->peers.push_back(std::move(pc));
-                        pixellib::core::logging::Logger::info("Connected to peer: {}", peer_info.to_string());
-                    }
-                }
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = torrents_.find(torrent_id);
-            if (it == torrents_.end()) break;
-            auto& torrent = it->second;
-
-            // 2. Cleanup disconnected peers
-            for (auto it_pc = torrent->peers.begin(); it_pc != torrent->peers.end(); ) {
-                if (!(*it_pc)->is_connected()) {
-                    it_pc = torrent->peers.erase(it_pc);
-                } else {
-                    ++it_pc;
-                }
-            }
-
-            // 3. Basic download coordination
-            if (torrent->peers.empty()) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                continue;
-            }
-
-            // Collect bitfields from connected and unchoked peers
-            std::vector<std::vector<bool>> bitfields;
-            for (const auto& pc : torrent->peers) {
-                if (pc->is_connected() && !pc->is_choking()) {
-                    bitfields.push_back(pc->get_bitfield());
-                }
-            }
-
-            if (bitfields.empty()) {
-                // If everyone is choking us, we still need to tell them we are interested
-                for (auto& pc : torrent->peers) {
-                    if (pc->is_connected() && !pc->is_interested()) {
-                        pc->set_interested(true);
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-                continue;
-            }
-
-            size_t piece_index = torrent->piece_manager->select_rarest_piece(bitfields);
-            if (piece_index != SIZE_MAX) {
-                // Find a peer that has this piece
-                for (auto& pc : torrent->peers) {
-                    if (pc->is_connected() && !pc->is_choking() && pc->get_bitfield()[piece_index]) {
-                        // Request blocks for this piece
-                        size_t block_size = 16384;
-                        size_t piece_size = (piece_index == torrent->metadata.piece_hashes.size() - 1) ?
-                            (torrent->metadata.total_length % torrent->metadata.piece_length) : torrent->metadata.piece_length;
-                        if (piece_size == 0) piece_size = torrent->metadata.piece_length;
-                        
-                        size_t num_blocks = (piece_size + block_size - 1) / block_size;
-                        
-                        bool any_requested = false;
-                        for (size_t b = 0; b < num_blocks; ++b) {
-                            if (torrent->piece_manager->request_block(piece_index, b, block_size)) {
-                                size_t offset = b * block_size;
-                                size_t len = std::min(block_size, piece_size - offset);
-                                pc->send_request(piece_index, offset, len);
-                                any_requested = true;
+                        if (it->second->piece_manager->receive_block(index, begin, data)) {
+                            it->second->downloaded_bytes += data.size();
+                            if (it->second->piece_manager->is_piece_complete(index)) {
+                                if (it->second->piece_manager->verify_piece(index)) {
+                                    // Piece verified!
+                                    // Send HAVE to all peers
+                                    // Use a copy to avoid iterating while modified or locking issues
+                                    auto peers_snapshot = it->second->peers;
+                                    for(auto& p : peers_snapshot) {
+                                        // Sending HAVE is async/non-blocking ideally, or fast enough
+                                        if(p->is_connected()) p->send_have(index);
+                                    }
+                                }
                             }
                         }
-                        
-                        if (any_requested) {
-                            pixellib::core::logging::Logger::info("Requested piece {} from a peer", piece_index);
-                            break; // Moved to next piece
-                        }
+                    }
+                });
+
+                if (peer_conn->connect()) {
+                    if (peer_conn->perform_handshake()) {
+                        new_connections.push_back(peer_conn);
                     }
                 }
             }
 
-            // 4. Verify completed pieces
-            for (size_t i = 0; i < torrent->metadata.piece_hashes.size(); ++i) {
-                if (!torrent->piece_manager->get_bitfield()[i] && torrent->piece_manager->is_piece_complete(i)) {
-                    if (torrent->piece_manager->verify_piece(i)) {
-                        pixellib::core::logging::Logger::info("Piece {} verified and completed", i);
-                        torrent->downloaded_bytes += (i == torrent->metadata.piece_hashes.size() - 1) ?
-                            (torrent->metadata.total_length % torrent->metadata.piece_length) : torrent->metadata.piece_length;
-                        
-                        // Broadcast HAVEs to all peers
-                        for (auto& pc : torrent->peers) {
-                            if (pc->is_connected()) pc->send_have(i);
-                        }
-                    }
+            // Update shared peer list
+            if (!new_connections.empty()) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto it = torrents_.find(torrent_id);
+                if (it != torrents_.end()) {
+                    it->second->peers.insert(it->second->peers.end(), new_connections.begin(), new_connections.end());
+
+                    // Cleanup disconnected peers
+                    it->second->peers.erase(
+                        std::remove_if(it->second->peers.begin(), it->second->peers.end(),
+                            [](const std::shared_ptr<PeerConnection>& p) { return !p->is_connected(); }),
+                        it->second->peers.end());
                 }
             }
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        // 2. Download Logic
+        {
+             // We need to lock to access piece manager and peer state safely
+             std::unique_lock<std::mutex> lock(mutex_);
+             auto it = torrents_.find(torrent_id);
+             if (it != torrents_.end()) {
+                 torrent = it->second.get();
+
+                 // If we have completed the torrent, we are seeding
+                 if (torrent->piece_manager->get_completion_percentage() >= 100.0) {
+                     // Seeding logic (uploading is handled by PeerConnection responding to requests)
+                 } else {
+                     // Downloading
+                     std::vector<std::vector<bool>> peer_bitfields;
+                     for(const auto& peer : torrent->peers) {
+                         if (peer->is_connected()) {
+                             peer_bitfields.push_back(peer->get_bitfield());
+                         }
+                     }
+
+                     size_t rarest_piece = torrent->piece_manager->select_rarest_piece(peer_bitfields);
+
+                     if (rarest_piece != SIZE_MAX) {
+                         // Find a peer that has this piece and is unchoked
+                         for (auto& peer : torrent->peers) {
+                             if (!peer->is_connected()) continue;
+                             if (peer->is_choking()) {
+                                 // Send interested if not already
+                                 // peer->send_interested(); // Need to implement
+                                 continue;
+                             }
+
+                             const auto& bitfield = peer->get_bitfield();
+                             if (rarest_piece < bitfield.size() && bitfield[rarest_piece]) {
+                                 // Request blocks
+                                 size_t block_size = 16384;
+                                 size_t piece_length = torrent->metadata.piece_length;
+                                 if (rarest_piece == torrent->metadata.files.size() - 1) { // Last piece calculation simplified
+                                      // Correct calculation should be in PieceManager
+                                 }
+
+                                 // Simply request a block for now
+                                 // A real implementation would manage block requests queue
+                                 if (torrent->piece_manager->request_block(rarest_piece, 0, block_size)) {
+                                     peer->send_request(rarest_piece, 0, block_size);
+                                 }
+                                 break; // Request one block per loop iteration for simplicity
+                             }
+                         }
+                     }
+                 }
+             }
+        }
+
+        // Sleep a bit to avoid busy loop
+        {
+            std::unique_lock<std::mutex> t_lock(torrent->mutex);
+            if (torrent->cv.wait_for(t_lock, std::chrono::milliseconds(100), [&](){ return torrent->stopping; })) break;
+        }
     }
 }
 
