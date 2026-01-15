@@ -1,0 +1,310 @@
+#include "peer_connection.hpp"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <cstring>
+#include <stdexcept>
+#include <chrono>
+
+namespace pixelscrape {
+
+PeerConnection::PeerConnection(const TorrentMetadata& metadata,
+                               const std::array<uint8_t, 20>& info_hash,
+                               const std::array<uint8_t, 20>& peer_id,
+                               const PeerInfo& peer_info)
+    : metadata_(metadata)
+    , info_hash_(info_hash)
+    , peer_id_(peer_id)
+    , peer_info_(peer_info)
+    , socket_fd_(-1)
+    , connected_(false)
+    , am_choking_(true)
+    , am_interested_(false)
+    , peer_choking_(true)
+    , peer_interested_(false)
+    , bitfield_(metadata.piece_hashes.size(), false)
+{
+}
+
+PeerConnection::~PeerConnection() {
+    disconnect();
+}
+
+bool PeerConnection::connect() {
+    if (connected_) return true;
+
+    socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd_ < 0) {
+        return false;
+    }
+
+    // Set non-blocking
+    int flags = fcntl(socket_fd_, F_GETFL, 0);
+    fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(peer_info_.port);
+    std::memcpy(&addr.sin_addr, peer_info_.ip.data(), 4);
+
+    int result = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    if (result < 0 && errno != EINPROGRESS) {
+        close(socket_fd_);
+        socket_fd_ = -1;
+        return false;
+    }
+
+    // Wait for connection with timeout
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(socket_fd_, &write_fds);
+
+    struct timeval timeout = {10, 0}; // 10 seconds
+    result = select(socket_fd_ + 1, nullptr, &write_fds, nullptr, &timeout);
+
+    if (result <= 0) {
+        close(socket_fd_);
+        socket_fd_ = -1;
+        return false;
+    }
+
+    // Check if connection was successful
+    int error;
+    socklen_t len = sizeof(error);
+    getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &error, &len);
+    if (error != 0) {
+        close(socket_fd_);
+        socket_fd_ = -1;
+        return false;
+    }
+
+    // Set back to blocking
+    fcntl(socket_fd_, F_SETFL, flags);
+
+    connected_ = true;
+    thread_ = std::thread(&PeerConnection::run, this);
+    return true;
+}
+
+void PeerConnection::disconnect() {
+    connected_ = false;
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+    if (socket_fd_ >= 0) {
+        close(socket_fd_);
+        socket_fd_ = -1;
+    }
+}
+
+void PeerConnection::run() {
+    while (connected_) {
+        auto message = receive_message();
+        if (message) {
+            handle_message(*message);
+        } else {
+            // Connection lost or timeout
+            connected_ = false;
+            break;
+        }
+    }
+}
+
+void PeerConnection::send_message(const PeerMessage& message) {
+    if (!connected_) return;
+
+    auto data = serialize_message(message);
+    size_t sent = 0;
+    while (sent < data.size()) {
+        ssize_t result = send(socket_fd_, data.data() + sent, data.size() - sent, 0);
+        if (result <= 0) {
+            connected_ = false;
+            return;
+        }
+        sent += result;
+    }
+}
+
+std::optional<PeerMessage> PeerConnection::receive_message() {
+    if (!connected_) return std::nullopt;
+
+    // Read message length (4 bytes, big-endian)
+    uint32_t length;
+    ssize_t result = recv(socket_fd_, &length, 4, MSG_WAITALL);
+    if (result != 4) {
+        return std::nullopt;
+    }
+
+    length = ntohl(length);
+    if (length == 0) {
+        // Keep-alive message
+        return PeerMessage{PeerMessageType::CHOKE, {}}; // Dummy message
+    }
+
+    if (length > 1024 * 1024) { // 1MB limit
+        connected_ = false;
+        return std::nullopt;
+    }
+
+    std::vector<uint8_t> payload(length);
+    result = recv(socket_fd_, payload.data(), length, MSG_WAITALL);
+    if (result != static_cast<ssize_t>(length)) {
+        return std::nullopt;
+    }
+
+    if (payload.empty()) {
+        return std::nullopt; // Invalid message
+    }
+
+    PeerMessageType type = static_cast<PeerMessageType>(payload[0]);
+    payload.erase(payload.begin()); // Remove type byte
+
+    return PeerMessage{type, payload};
+}
+
+void PeerConnection::handle_message(const PeerMessage& message) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    switch (message.type) {
+        case PeerMessageType::CHOKE:
+            peer_choking_ = true;
+            break;
+        case PeerMessageType::UNCHOKE:
+            peer_choking_ = false;
+            break;
+        case PeerMessageType::INTERESTED:
+            peer_interested_ = true;
+            break;
+        case PeerMessageType::NOT_INTERESTED:
+            peer_interested_ = false;
+            break;
+        case PeerMessageType::HAVE: {
+            if (message.payload.size() >= 4) {
+                uint32_t piece_index = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data()));
+                if (piece_index < bitfield_.size()) {
+                    bitfield_[piece_index] = true;
+                }
+            }
+            break;
+        }
+        case PeerMessageType::BITFIELD: {
+            size_t num_bytes = message.payload.size();
+            bitfield_.resize(metadata_.piece_hashes.size(), false);
+            for (size_t i = 0; i < num_bytes && i * 8 < bitfield_.size(); ++i) {
+                uint8_t byte = message.payload[i];
+                for (size_t j = 0; j < 8 && i * 8 + j < bitfield_.size(); ++j) {
+                    bitfield_[i * 8 + j] = (byte & (1 << (7 - j))) != 0;
+                }
+            }
+            break;
+        }
+        case PeerMessageType::REQUEST:
+            // Handle piece requests (for seeding)
+            break;
+        case PeerMessageType::PIECE:
+            // Handle received piece blocks
+            break;
+        case PeerMessageType::CANCEL:
+            // Handle cancel requests
+            break;
+        case PeerMessageType::PORT:
+            // Handle DHT port (not implemented)
+            break;
+    }
+}
+
+PeerMessage PeerConnection::create_message(PeerMessageType type, const std::vector<uint8_t>& payload) {
+    return {type, payload};
+}
+
+std::vector<uint8_t> PeerConnection::serialize_message(const PeerMessage& message) {
+    std::vector<uint8_t> data;
+
+    // Add payload length (4 bytes, big-endian)
+    uint32_t length = 1 + message.payload.size(); // +1 for message type
+    uint32_t length_be = htonl(length);
+    data.insert(data.end(), reinterpret_cast<uint8_t*>(&length_be),
+                reinterpret_cast<uint8_t*>(&length_be) + 4);
+
+    // Add message type
+    data.push_back(static_cast<uint8_t>(message.type));
+
+    // Add payload
+    data.insert(data.end(), message.payload.begin(), message.payload.end());
+
+    return data;
+}
+
+bool PeerConnection::perform_handshake() {
+    if (!connected_) return false;
+
+    // Create handshake message
+    std::vector<uint8_t> handshake;
+    handshake.reserve(68);
+
+    // Protocol string length (1 byte)
+    handshake.push_back(19);
+
+    // Protocol string
+    const char* protocol = "BitTorrent protocol";
+    handshake.insert(handshake.end(), protocol, protocol + 19);
+
+    // Reserved bytes (8 bytes)
+    handshake.insert(handshake.end(), 8, 0);
+
+    // Info hash (20 bytes)
+    handshake.insert(handshake.end(), info_hash_.begin(), info_hash_.end());
+
+    // Peer ID (20 bytes)
+    handshake.insert(handshake.end(), peer_id_.begin(), peer_id_.end());
+
+    // Send handshake
+    ssize_t sent = send(socket_fd_, handshake.data(), handshake.size(), 0);
+    if (sent != static_cast<ssize_t>(handshake.size())) {
+        return false;
+    }
+
+    // Receive handshake response
+    std::vector<uint8_t> response(68);
+    ssize_t received = recv(socket_fd_, response.data(), response.size(), MSG_WAITALL);
+    if (received != 68) {
+        return false;
+    }
+
+    // Verify response
+    if (response[0] != 19) return false;
+    if (std::memcmp(response.data() + 1, protocol, 19) != 0) return false;
+    if (std::memcmp(response.data() + 28, info_hash_.data(), 20) != 0) return false;
+
+    return true;
+}
+
+void PeerConnection::send_have(size_t piece_index) {
+    uint32_t index_be = htonl(piece_index);
+    std::vector<uint8_t> payload(reinterpret_cast<uint8_t*>(&index_be),
+                                reinterpret_cast<uint8_t*>(&index_be) + 4);
+    send_message(create_message(PeerMessageType::HAVE, payload));
+}
+
+void PeerConnection::send_request(size_t index, size_t begin, size_t length) {
+    std::vector<uint8_t> payload(12);
+    *reinterpret_cast<uint32_t*>(&payload[0]) = htonl(index);
+    *reinterpret_cast<uint32_t*>(&payload[4]) = htonl(begin);
+    *reinterpret_cast<uint32_t*>(&payload[8]) = htonl(length);
+    send_message(create_message(PeerMessageType::REQUEST, payload));
+}
+
+void PeerConnection::send_piece(size_t index, size_t begin, const std::vector<uint8_t>& data) {
+    std::vector<uint8_t> payload(8 + data.size());
+    *reinterpret_cast<uint32_t*>(&payload[0]) = htonl(index);
+    *reinterpret_cast<uint32_t*>(&payload[4]) = htonl(begin);
+    std::memcpy(&payload[8], data.data(), data.size());
+    send_message(create_message(PeerMessageType::PIECE, payload));
+}
+
+} // namespace pixelscrape

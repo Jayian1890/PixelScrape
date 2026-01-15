@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PixelScrape - Torrent Client</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Roboto', 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+            color: #202124;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: white;
+            padding: 16px 0;
+            border-bottom: 1px solid #e8eaed;
+            margin-bottom: 24px;
+        }
+
+        .header h1 {
+            color: #1a73e8;
+            font-size: 24px;
+            font-weight: 400;
+        }
+
+        .search-bar {
+            background: white;
+            padding: 24px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            margin-bottom: 24px;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 12px 16px;
+            border: 1px solid #dadce0;
+            border-radius: 24px;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .search-input:focus {
+            border-color: #1a73e8;
+        }
+
+        .add-button {
+            background: #1a73e8;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 24px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            margin-top: 12px;
+            transition: background-color 0.2s;
+        }
+
+        .add-button:hover {
+            background: #1557b0;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: 300;
+            color: #1a73e8;
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            color: #5f6368;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .torrents {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .torrent-item {
+            padding: 16px 24px;
+            border-bottom: 1px solid #e8eaed;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .torrent-item:last-child {
+            border-bottom: none;
+        }
+
+        .torrent-info {
+            flex: 1;
+        }
+
+        .torrent-name {
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .torrent-meta {
+            font-size: 14px;
+            color: #5f6368;
+        }
+
+        .progress-bar {
+            width: 200px;
+            height: 8px;
+            background: #e8eaed;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 0 16px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: #1a73e8;
+            transition: width 0.3s ease;
+        }
+
+        .torrent-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .action-button {
+            background: none;
+            border: 1px solid #dadce0;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .action-button:hover {
+            background: #f8f9fa;
+            border-color: #5f6368;
+        }
+
+        .delete-button {
+            color: #ea4335;
+            border-color: #ea4335;
+        }
+
+        .delete-button:hover {
+            background: #fce8e6;
+        }
+
+        .file-tree {
+            margin-top: 8px;
+            padding-left: 16px;
+            border-left: 2px solid #e8eaed;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 4px 0;
+            font-size: 14px;
+        }
+
+        .file-checkbox {
+            margin-right: 8px;
+        }
+
+        .file-size {
+            margin-left: auto;
+            color: #5f6368;
+            font-size: 12px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 16px;
+            }
+
+            .torrent-item {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+
+            .progress-bar {
+                width: 100%;
+                margin: 8px 0;
+            }
+
+            .torrent-actions {
+                align-self: flex-end;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1>PixelScrape</h1>
+        </header>
+
+        <div class="search-bar">
+            <input type="text" id="torrentPath" class="search-input" placeholder="Enter .torrent file path or magnet link">
+            <button id="addTorrent" class="add-button">Add Torrent</button>
+        </div>
+
+        <div id="stats" class="stats">
+            <!-- Stats will be populated by JavaScript -->
+        </div>
+
+        <div id="torrents" class="torrents">
+            <!-- Torrents will be populated by JavaScript -->
+        </div>
+    </div>
+
+    <script>
+        class TorrentClient {
+            constructor() {
+                this.ws = null;
+                this.connectWebSocket();
+                this.loadTorrents();
+                this.loadStats();
+                this.setupEventListeners();
+            }
+
+            connectWebSocket() {
+                try {
+                    this.ws = new WebSocket('ws://localhost:8081');
+                    this.ws.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            this.updateStats(data);
+                        } catch (e) {
+                            console.error('Failed to parse WebSocket message:', e);
+                        }
+                    };
+                    this.ws.onclose = () => {
+                        setTimeout(() => this.connectWebSocket(), 5000);
+                    };
+                } catch (e) {
+                    console.error('WebSocket connection failed:', e);
+                }
+            }
+
+            async loadTorrents() {
+                try {
+                    const response = await fetch('/api/torrents');
+                    const torrents = await response.json();
+                    this.renderTorrents(torrents);
+                } catch (e) {
+                    console.error('Failed to load torrents:', e);
+                }
+            }
+
+            async loadStats() {
+                try {
+                    const response = await fetch('/api/stats');
+                    const stats = await response.json();
+                    this.updateStats(stats);
+                } catch (e) {
+                    console.error('Failed to load stats:', e);
+                }
+            }
+
+            updateStats(stats) {
+                const statsContainer = document.getElementById('stats');
+                statsContainer.innerHTML = `
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.total_torrents || 0}</div>
+                        <div class="stat-label">Active Torrents</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${this.formatBytes(stats.total_downloaded || 0)}</div>
+                        <div class="stat-label">Downloaded</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${this.formatBytes(stats.total_uploaded || 0)}</div>
+                        <div class="stat-label">Uploaded</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">${stats.active_peers || 0}</div>
+                        <div class="stat-label">Active Peers</div>
+                    </div>
+                `;
+            }
+
+            renderTorrents(torrents) {
+                const container = document.getElementById('torrents');
+                container.innerHTML = torrents.map(torrent => `
+                    <div class="torrent-item">
+                        <div class="torrent-info">
+                            <div class="torrent-name">${torrent.name}</div>
+                            <div class="torrent-meta">
+                                ${this.formatBytes(torrent.downloaded)} of ${this.formatBytes(torrent.total_size)} •
+                                ${torrent.peers} peers • ${torrent.paused ? 'Paused' : 'Active'}
+                            </div>
+                            ${this.renderFileTree(torrent.files)}
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${torrent.completion}%"></div>
+                        </div>
+                        <div class="torrent-actions">
+                            <button class="action-button" onclick="client.pauseResumeTorrent('${torrent.info_hash}')">
+                                ${torrent.paused ? 'Resume' : 'Pause'}
+                            </button>
+                            <button class="action-button delete-button" onclick="client.removeTorrent('${torrent.info_hash}')">
+                                Remove
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            }
+
+            renderFileTree(files) {
+                if (!files || files.length <= 1) return '';
+
+                return `
+                    <div class="file-tree">
+                        ${files.map(file => `
+                            <div class="file-item">
+                                <input type="checkbox" class="file-checkbox"
+                                       ${file.priority > 0 ? 'checked' : ''}
+                                       onchange="client.updateFilePriority('${file.path}', this.checked)">
+                                <span>${file.path.split('/').pop()}</span>
+                                <span class="file-size">${this.formatBytes(file.size)}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+
+            async addTorrent() {
+                const pathInput = document.getElementById('torrentPath');
+                const path = pathInput.value.trim();
+
+                if (!path) {
+                    alert('Please enter a torrent file path');
+                    return;
+                }
+
+                try {
+                    const response = await fetch('/api/torrents', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ path: path })
+                    });
+
+                    const result = await response.json();
+                    if (result.success) {
+                        pathInput.value = '';
+                        this.loadTorrents();
+                        this.loadStats();
+                    } else {
+                        alert('Failed to add torrent: ' + result.error);
+                    }
+                } catch (e) {
+                    console.error('Failed to add torrent:', e);
+                    alert('Failed to add torrent');
+                }
+            }
+
+            async removeTorrent(torrentId) {
+                if (!confirm('Are you sure you want to remove this torrent?')) return;
+
+                try {
+                    const response = await fetch(`/api/torrents/${torrentId}`, {
+                        method: 'DELETE'
+                    });
+
+                    const result = await response.json();
+                    if (result.success) {
+                        this.loadTorrents();
+                        this.loadStats();
+                    } else {
+                        alert('Failed to remove torrent');
+                    }
+                } catch (e) {
+                    console.error('Failed to remove torrent:', e);
+                }
+            }
+
+            async pauseResumeTorrent(torrentId) {
+                // This would need additional API endpoints for pause/resume
+                alert('Pause/Resume functionality not yet implemented in this demo');
+            }
+
+            async updateFilePriority(filePath, enabled) {
+                // This would need additional API endpoints for file priority updates
+                console.log('File priority update:', filePath, enabled);
+            }
+
+            formatBytes(bytes) {
+                if (bytes === 0) return '0 B';
+                const k = 1024;
+                const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+            }
+
+            setupEventListeners() {
+                document.getElementById('addTorrent').addEventListener('click', () => this.addTorrent());
+                document.getElementById('torrentPath').addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') this.addTorrent();
+                });
+            }
+        }
+
+        // Initialize client when page loads
+        const client = new TorrentClient();
+
+        // Refresh data periodically
+        setInterval(() => {
+            client.loadTorrents();
+            client.loadStats();
+        }, 5000);
+    </script>
+</body>
+</html>

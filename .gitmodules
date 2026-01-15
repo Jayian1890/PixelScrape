@@ -1,0 +1,3 @@
+[submodule "external/pixellib"]
+	path = external/pixellib
+	url = https://github.com/Jayian1890/pixelLib
