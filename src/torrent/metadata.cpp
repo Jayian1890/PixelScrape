@@ -3,6 +3,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <cstring>
+#include <algorithm>
 
 namespace pixelscrape {
 
@@ -42,6 +43,25 @@ TorrentMetadata TorrentMetadataParser::parse_from_bencode(const BencodeDict& dic
         throw std::runtime_error("Missing or invalid announce URL");
     }
     metadata.announce = std::get<BencodeString>(announce_it->second);
+    metadata.announce_list.push_back(metadata.announce);
+
+    auto announce_list_it = dict.values.find("announce-list");
+    if (announce_list_it != dict.values.end() && std::holds_alternative<std::unique_ptr<BencodeList>>(announce_list_it->second)) {
+        const auto& list = *std::get<std::unique_ptr<BencodeList>>(announce_list_it->second);
+        for (const auto& tier_val : list.items) {
+            if (std::holds_alternative<std::unique_ptr<BencodeList>>(tier_val)) {
+                const auto& tier = *std::get<std::unique_ptr<BencodeList>>(tier_val);
+                for (const auto& url_val : tier.items) {
+                    if (std::holds_alternative<BencodeString>(url_val)) {
+                        std::string url = std::get<BencodeString>(url_val);
+                        if (std::find(metadata.announce_list.begin(), metadata.announce_list.end(), url) == metadata.announce_list.end()) {
+                            metadata.announce_list.push_back(url);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Extract info dictionary
     auto info_it = dict.values.find("info");

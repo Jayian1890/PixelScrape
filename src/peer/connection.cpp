@@ -1,4 +1,5 @@
 #include "peer_connection.hpp"
+#include "piece_manager.hpp"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -8,19 +9,19 @@
 #include <sys/select.h>
 #include <sys/time.h>
 #include <cstring>
-#include <stdexcept>
-#include <chrono>
 
 namespace pixelscrape {
 
 PeerConnection::PeerConnection(const TorrentMetadata& metadata,
                                const std::array<uint8_t, 20>& info_hash,
                                const std::array<uint8_t, 20>& peer_id,
-                               const PeerInfo& peer_info)
+                               const PeerInfo& peer_info,
+                               PieceManager& piece_manager)
     : metadata_(metadata)
     , info_hash_(info_hash)
     , peer_id_(peer_id)
     , peer_info_(peer_info)
+    , piece_manager_(piece_manager)
     , socket_fd_(-1)
     , connected_(false)
     , am_choking_(true)
@@ -64,7 +65,7 @@ bool PeerConnection::connect() {
     FD_ZERO(&write_fds);
     FD_SET(socket_fd_, &write_fds);
 
-    struct timeval timeout = {10, 0}; // 10 seconds
+    struct timeval timeout = {3, 0}; // 3 seconds
     result = select(socket_fd_ + 1, nullptr, &write_fds, nullptr, &timeout);
 
     if (result <= 0) {
@@ -142,8 +143,7 @@ std::optional<PeerMessage> PeerConnection::receive_message() {
 
     length = ntohl(length);
     if (length == 0) {
-        // Keep-alive message
-        return PeerMessage{PeerMessageType::CHOKE, {}}; // Dummy message
+        return PeerMessage{PeerMessageType::KEEP_ALIVE, {}};
     }
 
     if (length > 1024 * 1024) { // 1MB limit
@@ -165,6 +165,18 @@ std::optional<PeerMessage> PeerConnection::receive_message() {
     payload.erase(payload.begin()); // Remove type byte
 
     return PeerMessage{type, payload};
+}
+
+void PeerConnection::set_interested(bool interested) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (am_interested_ == interested) return;
+    
+    am_interested_ = interested;
+    if (am_interested_) {
+        send_message(create_message(PeerMessageType::INTERESTED));
+    } else {
+        send_message(create_message(PeerMessageType::NOT_INTERESTED));
+    }
 }
 
 void PeerConnection::handle_message(const PeerMessage& message) {
@@ -206,14 +218,23 @@ void PeerConnection::handle_message(const PeerMessage& message) {
         case PeerMessageType::REQUEST:
             // Handle piece requests (for seeding)
             break;
-        case PeerMessageType::PIECE:
-            // Handle received piece blocks
+        case PeerMessageType::PIECE: {
+            if (message.payload.size() >= 8) {
+                uint32_t piece_index = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data()));
+                uint32_t begin = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data() + 4));
+                std::vector<uint8_t> block_data(message.payload.begin() + 8, message.payload.end());
+                
+                piece_manager_.receive_block(piece_index, begin, block_data);
+            }
             break;
+        }
         case PeerMessageType::CANCEL:
             // Handle cancel requests
             break;
         case PeerMessageType::PORT:
             // Handle DHT port (not implemented)
+            break;
+        case PeerMessageType::KEEP_ALIVE:
             break;
     }
 }

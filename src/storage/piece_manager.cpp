@@ -3,7 +3,6 @@
 #include <filesystem.hpp>
 #include <algorithm>
 #include <fstream>
-#include <stdexcept>
 
 namespace pixelscrape {
 
@@ -82,15 +81,16 @@ bool PieceManager::request_block(size_t piece_index, size_t block_index, size_t 
         if (piece_size == 0) piece_size = metadata_.piece_length;
 
         download.total_blocks = (piece_size + block_size - 1) / block_size;
+        download.blocks_requested.resize(download.total_blocks, false);
         download.blocks_received.resize(download.total_blocks, false);
         download.block_data.resize(download.total_blocks);
         download.start_time = std::chrono::steady_clock::now();
     }
 
-    if (block_index >= download.blocks_received.size()) return false;
-    if (download.blocks_received[block_index]) return false; // Already received
+    if (block_index >= download.blocks_requested.size()) return false;
+    if (download.blocks_requested[block_index]) return false; // Already requested
 
-    download.blocks_received[block_index] = true;
+    download.blocks_requested[block_index] = true;
     return true;
 }
 
@@ -154,6 +154,7 @@ bool PieceManager::verify_piece(size_t piece_index) {
 }
 
 std::vector<uint8_t> PieceManager::read_piece(size_t piece_index) {
+    (void)piece_index;
     // This would be used for seeding - read piece data from files
     // Implementation would reconstruct piece from file mappings
     return {};
@@ -180,7 +181,32 @@ size_t PieceManager::get_completed_pieces() const {
 }
 
 double PieceManager::get_completion_percentage() const {
-    return static_cast<double>(get_completed_pieces()) / get_total_pieces() * 100.0;
+    if (metadata_.total_length == 0) return 0.0;
+    return static_cast<double>(get_total_downloaded_bytes()) / metadata_.total_length * 100.0;
+}
+
+size_t PieceManager::get_total_downloaded_bytes() const {
+    std::lock_guard<std::mutex> lock(pieces_mutex_);
+    size_t total = 0;
+    
+    // Completed pieces
+    for (size_t i = 0; i < have_pieces_.size(); ++i) {
+        if (have_pieces_[i]) {
+            size_t piece_size = (i == have_pieces_.size() - 1) ? 
+                (metadata_.total_length - (have_pieces_.size() - 1) * metadata_.piece_length) :
+                metadata_.piece_length;
+            total += piece_size;
+        }
+    }
+
+    // Partially downloaded pieces
+    for (const auto& download : active_downloads_) {
+        for (const auto& block : download.block_data) {
+            total += block.size();
+        }
+    }
+
+    return total;
 }
 
 std::vector<bool> PieceManager::get_bitfield() const {
@@ -259,7 +285,7 @@ void PieceManager::calculate_file_mappings() {
 std::pair<size_t, size_t> PieceManager::get_file_range(size_t piece_index, size_t offset, size_t length) const {
     // Helper for mapping piece offsets to file ranges
     size_t global_offset = piece_index * metadata_.piece_length + offset;
-    size_t end_offset = global_offset + length;
+    (void)length;
 
     // Find which file this range belongs to
     for (size_t i = 0; i < metadata_.files.size(); ++i) {
@@ -269,7 +295,6 @@ std::pair<size_t, size_t> PieceManager::get_file_range(size_t piece_index, size_
 
         if (global_offset >= file_start && global_offset < file_end) {
             size_t file_offset = global_offset - file_start;
-            size_t file_length = std::min(length, file_end - global_offset);
             return {i, file_offset};
         }
     }

@@ -41,7 +41,7 @@ int main(int argc, char* argv[]) {
 
     try {
         // Create directories
-        fs::path download_dir = "downloads";
+        fs::path download_dir = fs::path(home_env) / "Downloads";
         fs::path state_dir = config_dir / "state";
         fs::create_directories(download_dir);
         fs::create_directories(state_dir);
@@ -239,7 +239,8 @@ int main(int argc, char* argv[]) {
 
         // Main loop
         while (running) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            torrent_manager.update_speeds();
 
             // Broadcast status update
             pixellib::core::json::JSON update = pixellib::core::json::JSON::object({});

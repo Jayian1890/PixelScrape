@@ -25,6 +25,11 @@ struct Torrent {
     std::thread peer_thread;
     std::atomic<size_t> uploaded_bytes{0};
     std::atomic<size_t> downloaded_bytes{0};
+    std::atomic<size_t> download_speed{0};
+    std::atomic<size_t> upload_speed{0};
+    size_t last_downloaded_bytes{0};
+    size_t last_uploaded_bytes{0};
+    std::chrono::steady_clock::time_point last_speed_update{std::chrono::steady_clock::now()};
     std::vector<size_t> file_priorities;
     bool paused{false};
 };
@@ -48,6 +53,7 @@ public:
     std::optional<pixellib::core::json::JSON> get_torrent_status(const std::string& torrent_id) const;
 
     // Statistics
+    void update_speeds();
     pixellib::core::json::JSON get_global_stats() const;
 
 private:
@@ -60,6 +66,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<Torrent>> torrents_;
     std::filesystem::path download_dir_;
     StateManager state_manager_;
+    std::atomic<bool> running_{true};
     mutable std::mutex mutex_;
 };
 

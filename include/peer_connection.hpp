@@ -12,6 +12,8 @@
 
 namespace pixelscrape {
 
+class PieceManager;
+
 enum class PeerMessageType : uint8_t {
     CHOKE = 0,
     UNCHOKE = 1,
@@ -22,7 +24,8 @@ enum class PeerMessageType : uint8_t {
     REQUEST = 6,
     PIECE = 7,
     CANCEL = 8,
-    PORT = 9
+    PORT = 9,
+    KEEP_ALIVE = 10
 };
 
 struct PeerMessage {
@@ -47,13 +50,15 @@ public:
     PeerConnection(const TorrentMetadata& metadata,
                    const std::array<uint8_t, 20>& info_hash,
                    const std::array<uint8_t, 20>& peer_id,
-                   const PeerInfo& peer_info);
+                   const PeerInfo& peer_info,
+                   PieceManager& piece_manager);
     ~PeerConnection();
 
     // Connection management
     bool connect();
     void disconnect();
     bool is_connected() const { return connected_; }
+    const PeerInfo& get_peer_info() const { return peer_info_; }
 
     // Message handling
     void send_message(const PeerMessage& message);
@@ -62,6 +67,7 @@ public:
     // State queries
     bool is_choking() const { return peer_choking_; }
     bool is_interested() const { return am_interested_; }
+    void set_interested(bool interested);
     const std::vector<bool>& get_bitfield() const { return bitfield_; }
 
     // Piece management
@@ -82,6 +88,7 @@ private:
     std::array<uint8_t, 20> info_hash_;
     std::array<uint8_t, 20> peer_id_;
     PeerInfo peer_info_;
+    PieceManager& piece_manager_;
 
     int socket_fd_;
     std::atomic<bool> connected_;

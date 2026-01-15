@@ -14,6 +14,7 @@ namespace pixelscrape {
 
 struct PieceDownload {
     size_t index;
+    std::vector<bool> blocks_requested;
     std::vector<bool> blocks_received;
     std::vector<std::vector<uint8_t>> block_data;
     size_t total_blocks;
@@ -49,6 +50,7 @@ public:
     size_t get_completed_pieces() const;
     size_t get_total_pieces() const { return metadata_.piece_hashes.size(); }
     double get_completion_percentage() const;
+    size_t get_total_downloaded_bytes() const;
 
     // State management
     std::vector<bool> get_bitfield() const;
@@ -80,8 +82,8 @@ private:
     std::queue<DiskRequest> disk_queue_;
     std::mutex disk_mutex_;
     std::condition_variable disk_cv_;
-    std::thread disk_thread_;
     std::atomic<bool> disk_running_;
+    std::thread disk_thread_;
 };
 
 } // namespace pixelscrape
