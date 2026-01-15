@@ -15,9 +15,10 @@ std::vector<PeerInfo> TrackerClient::get_peers(
     size_t uploaded,
     size_t downloaded,
     size_t left,
-    const std::string& event
+    const std::string& event,
+    std::optional<std::string> announce_url
 ) {
-    std::string url = build_tracker_url(peer_id, port, uploaded, downloaded, left, event);
+    std::string url = build_tracker_url(peer_id, port, uploaded, downloaded, left, event, announce_url);
 
     try {
         auto response = pixellib::core::network::Network::http_get(url);
@@ -54,8 +55,39 @@ std::vector<PeerInfo> TrackerClient::get_peers(
         if (std::holds_alternative<BencodeString>(peers_it->second)) {
             // Compact peer list
             return parse_compact_peers(std::get<BencodeString>(peers_it->second));
+        } else if (std::holds_alternative<std::unique_ptr<BencodeList>>(peers_it->second)) {
+            // List of dictionaries
+            const auto& peers_list = *std::get<std::unique_ptr<BencodeList>>(peers_it->second);
+            std::vector<PeerInfo> peers;
+            for (const auto& peer_val : peers_list.items) {
+                if (std::holds_alternative<std::unique_ptr<BencodeDict>>(peer_val)) {
+                    const auto& peer_dict = *std::get<std::unique_ptr<BencodeDict>>(peer_val);
+                    auto ip_it = peer_dict.values.find("ip");
+                    auto port_it = peer_dict.values.find("port");
+                    
+                    if (ip_it != peer_dict.values.end() && port_it != peer_dict.values.end() &&
+                        std::holds_alternative<BencodeString>(ip_it->second) &&
+                        std::holds_alternative<BencodeInteger>(port_it->second)) {
+                        
+                        PeerInfo info;
+                        std::string ip_str = std::get<BencodeString>(ip_it->second);
+                        
+                        // Parse IP string (A.B.C.D)
+                        int a, b, c, d;
+                        if (sscanf(ip_str.c_str(), "%d.%d.%d.%d", &a, &b, &c, &d) == 4) {
+                            info.ip[0] = static_cast<uint8_t>(a);
+                            info.ip[1] = static_cast<uint8_t>(b);
+                            info.ip[2] = static_cast<uint8_t>(c);
+                            info.ip[3] = static_cast<uint8_t>(d);
+                            info.port = static_cast<uint16_t>(std::get<BencodeInteger>(port_it->second));
+                            peers.push_back(info);
+                        }
+                    }
+                }
+            }
+            return peers;
         } else {
-            throw std::runtime_error("Unsupported peer format (only compact format supported)");
+            throw std::runtime_error("Unsupported peer format");
         }
 
     } catch (const std::exception& e) {
@@ -69,10 +101,11 @@ std::string TrackerClient::build_tracker_url(
     size_t uploaded,
     size_t downloaded,
     size_t left,
-    const std::string& event
+    const std::string& event,
+    std::optional<std::string> announce_url
 ) const {
     std::stringstream url;
-    url << metadata_.announce;
+    url << (announce_url ? *announce_url : metadata_.announce);
 
     // Add query parameters
     url << "?info_hash=" << url_encode(std::string(reinterpret_cast<const char*>(metadata_.info_hash.data()), 20));
@@ -103,10 +136,7 @@ std::vector<PeerInfo> TrackerClient::parse_compact_peers(const std::string& peer
 
         PeerInfo peer;
         std::memcpy(peer.ip.data(), peer_data, 4);
-        std::memcpy(&peer.port, peer_data + 4, 2);
-
-        // Convert port to host byte order
-        peer.port = (peer_data[4] << 8) | peer_data[5];
+        peer.port = (static_cast<uint8_t>(peer_data[4]) << 8) | static_cast<uint8_t>(peer_data[5]);
 
         peers.push_back(peer);
     }

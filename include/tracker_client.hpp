@@ -26,7 +26,8 @@ public:
         size_t uploaded,
         size_t downloaded,
         size_t left,
-        const std::string& event = ""
+        const std::string& event = "",
+        std::optional<std::string> announce_url = std::nullopt
     );
 
 private:
@@ -36,7 +37,8 @@ private:
         size_t uploaded,
         size_t downloaded,
         size_t left,
-        const std::string& event
+        const std::string& event,
+        std::optional<std::string> announce_url = std::nullopt
     ) const;
 
     std::vector<PeerInfo> parse_compact_peers(const std::string& peers_data) const;

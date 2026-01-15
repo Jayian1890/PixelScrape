@@ -419,6 +419,36 @@
             background: rgba(239, 68, 68, 0.1);
             color: var(--danger);
         }
+
+        .peer-list-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            font-size: 12px;
+        }
+
+        .peer-list-table th {
+            text-align: left;
+            color: var(--text-dim);
+            padding: 8px;
+            border-bottom: 1px solid var(--border);
+            font-weight: 500;
+        }
+
+        .peer-list-table td {
+            padding: 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            color: var(--text-main);
+        }
+
+        .peer-list-container {
+            max-height: 150px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 10px;
+            padding: 8px;
+            margin-top: 12px;
+        }
     </style>
 </head>
 
@@ -429,27 +459,27 @@
             <span>PixelScrape</span>
         </div>
         <nav class="nav-group">
-            <div class="nav-item active" onclick="client.filterTorrents('all')">
+            <div class="nav-item active" onclick="client.filterTorrents('all', event)">
                 <i data-lucide="layout-grid"></i>
                 <span>All Torrents</span>
                 <span class="nav-count" id="count-all">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('downloading')">
+            <div class="nav-item" onclick="client.filterTorrents('downloading', event)">
                 <i data-lucide="download-cloud"></i>
                 <span>Downloading</span>
                 <span class="nav-count" id="count-down">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('completed')">
+            <div class="nav-item" onclick="client.filterTorrents('completed', event)">
                 <i data-lucide="check-circle"></i>
                 <span>Completed</span>
                 <span class="nav-count" id="count-done">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('active')">
+            <div class="nav-item" onclick="client.filterTorrents('active', event)">
                 <i data-lucide="activity"></i>
                 <span>Active</span>
                 <span class="nav-count" id="count-active">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('paused')">
+            <div class="nav-item" onclick="client.filterTorrents('paused', event)">
                 <i data-lucide="pause-circle"></i>
                 <span>Paused</span>
                 <span class="nav-count" id="count-paused">0</span>
@@ -535,6 +565,7 @@
             constructor() {
                 this.torrents = [];
                 this.filter = 'all';
+                this.expandedTorrents = new Set();
                 this.ws = null;
                 this.connectWebSocket();
                 this.init();
@@ -634,11 +665,20 @@
                 } catch (e) { }
             }
 
-            filterTorrents(type) {
+            filterTorrents(type, event) {
                 this.filter = type;
                 document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-                const target = event.currentTarget || document.querySelector(`.nav-item:nth-child(${['all', 'downloading', 'completed', 'active', 'paused'].indexOf(type) + 1})`);
+                const target = event ? event.currentTarget : document.querySelector(`.nav-item:nth-child(${['all', 'downloading', 'completed', 'active', 'paused'].indexOf(type) + 1})`);
                 if (target) target.classList.add('active');
+                this.renderTorrents();
+            }
+
+            togglePeers(id) {
+                if (this.expandedTorrents.has(id)) {
+                    this.expandedTorrents.delete(id);
+                } else {
+                    this.expandedTorrents.add(id);
+                }
                 this.renderTorrents();
             }
 
@@ -683,7 +723,7 @@
                                     <div class="torrent-name">${t.name}</div>
                                     <div class="torrent-meta">
                                         <span><i data-lucide="package" style="width:14px"></i> ${this.formatBytes(t.total_size)}</span>
-                                        <span><i data-lucide="users" style="width:14px"></i> ${t.peers} peers</span>
+                                        <span><i data-lucide="users" style="width:14px"></i> ${t.peers} / ${t.total_peers} peers</span>
                                         <span class="badge ${t.paused ? 'badge-paused' : 'badge-downloading'}">
                                             ${t.paused ? 'Paused' : (t.completion >= 100 ? 'Seeding' : 'Downloading')}
                                         </span>
@@ -697,8 +737,33 @@
                                 <div class="progress-bar" style="width: ${t.completion}%"></div>
                             </div>
                             <div class="torrent-meta">
-                                <span><i data-lucide="arrow-down" style="width:14px"></i> ${this.formatBytes(t.downloaded)} downloaded</span>
-                                <span><i data-lucide="arrow-up" style="width:14px"></i> ${this.formatBytes(t.uploaded)} uploaded</span>
+                                <span><i data-lucide="arrow-down" style="width:14px"></i> ${this.formatBytes(t.downloaded)} (${this.formatBytes(t.download_speed)}/s)</span>
+                                <span><i data-lucide="arrow-up" style="width:14px"></i> ${this.formatBytes(t.uploaded)} (${this.formatBytes(t.upload_speed)}/s)</span>
+                                <button class="btn-text" onclick="client.togglePeers('${t.info_hash}')" style="margin-left:auto; font-size:12px; color:var(--primary); cursor:pointer; background:none; border:none; padding:0;">
+                                    ${this.expandedTorrents.has(t.info_hash) ? 'Hide Peers' : 'View Peers'}
+                                </button>
+                            </div>
+                            <div class="peer-list-container" style="display: ${this.expandedTorrents.has(t.info_hash) ? 'block' : 'none'};">
+                                <table class="peer-list-table">
+                                    <thead>
+                                        <tr>
+                                            <th>IP Address</th>
+                                            <th>Port</th>
+                                            <th>Client</th>
+                                            <th>Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${t.peers_list && t.peers_list.length > 0 ? t.peers_list.map(p => `
+                                            <tr>
+                                                <td>${p.ip}</td>
+                                                <td>${p.port}</td>
+                                                <td>${p.client}</td>
+                                                <td><span style="color: ${p.choking ? 'var(--warning)' : 'var(--success)'}">${p.choking ? 'Choked' : 'Active'}</span></td>
+                                            </tr>
+                                        `).join('') : '<tr><td colspan="4" style="text-align:center; opacity:0.5; padding:20px;">Connecting to peers...</td></tr>'}
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
                         <div class="torrent-actions">
@@ -717,10 +782,8 @@
             updateStatsDisplay(stats) {
                 document.getElementById('stat-total-down').innerText = this.formatBytes(stats.total_downloaded || 0);
                 document.getElementById('stat-peers').innerText = stats.active_peers || 0;
-                // Speeds aren't real yet, let's just mock them if downloading
-                const isDownloading = this.torrents.some(t => !t.paused && t.completion < 100);
-                document.getElementById('stat-down-speed').innerText = isDownloading ? (Math.random() * 5 + 2).toFixed(1) + ' MB/s' : '0.0 MB/s';
-                document.getElementById('stat-up-speed').innerText = isDownloading ? (Math.random() * 0.5 + 0.1).toFixed(1) + ' MB/s' : '0.0 MB/s';
+                document.getElementById('stat-down-speed').innerText = this.formatBytes(stats.download_speed || 0) + '/s';
+                document.getElementById('stat-up-speed').innerText = this.formatBytes(stats.upload_speed || 0) + '/s';
             }
 
             async addTorrent() {
@@ -742,12 +805,14 @@
                 }
 
                 try {
+                    console.log('Adding torrent...', body);
                     const response = await fetch('/api/torrents', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(body)
                     });
                     const res = await response.json();
+                    console.log('Add response:', res);
                     if (res.success) {
                         this.toggleModal('addModal', false);
                         pathInput.value = '';
@@ -757,7 +822,10 @@
                     } else {
                         alert('Error: ' + res.error);
                     }
-                } catch (e) { alert('Failed to add torrent'); }
+                } catch (e) {
+                    console.error('Failed to add torrent:', e);
+                    alert('Failed to add torrent. See console for details.');
+                }
             }
 
             fileToBase64(file) {
