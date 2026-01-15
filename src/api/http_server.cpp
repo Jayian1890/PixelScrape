@@ -152,18 +152,23 @@ HttpRequest HttpServer::parse_request(int client_socket) {
         }
     }
 
-    // Read headers
-    while ((bytes_read = recv(client_socket, buffer, sizeof(buffer), 0)) > 0) {
-        request_line.append(buffer, bytes_read);
+    // Process headers
+    while (true) {
+        size_t pos = request_line.find("\r\n");
+        if (pos == std::string::npos) {
+            // Need more data
+            bytes_read = recv(client_socket, buffer, sizeof(buffer), 0);
+            if (bytes_read <= 0) break;
+            request_line.append(buffer, bytes_read);
+            continue;
+        }
 
-        size_t pos;
-        while ((pos = request_line.find("\r\n")) != std::string::npos) {
-            line = request_line.substr(0, pos);
-            request_line = request_line.substr(pos + 2);
+        line = request_line.substr(0, pos);
+        request_line = request_line.substr(pos + 2);
 
-            if (line.empty()) {
-                // End of headers, read body if Content-Length present
-                auto cl_it = request.headers.find("Content-Length");
+        if (line.empty()) {
+            // End of headers, read body if Content-Length present
+            auto cl_it = request.headers.find("Content-Length");
                 if (cl_it != request.headers.end()) {
                     size_t content_length = std::stoul(cl_it->second);
                     if (content_length > 0) {
@@ -201,7 +206,7 @@ HttpRequest HttpServer::parse_request(int client_socket) {
 
                 request.headers[header_name] = header_value;
             }
-        }
+
     }
 
     throw std::runtime_error("Incomplete request");

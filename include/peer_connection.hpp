@@ -69,12 +69,18 @@ public:
     void send_request(size_t index, size_t begin, size_t length);
     void send_piece(size_t index, size_t begin, const std::vector<uint8_t>& data);
 
+    // Callbacks
+    using PieceCallback = std::function<void(size_t index, size_t begin, const std::vector<uint8_t>& data)>;
+    void set_piece_callback(PieceCallback cb) { piece_callback_ = cb; }
+
     // Handshake
     bool perform_handshake();
 
 private:
     void run();
     void handle_message(const PeerMessage& message);
+
+    PieceCallback piece_callback_;
     PeerMessage create_message(PeerMessageType type, const std::vector<uint8_t>& payload = {});
     std::vector<uint8_t> serialize_message(const PeerMessage& message);
 
