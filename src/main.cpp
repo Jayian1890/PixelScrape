@@ -6,6 +6,7 @@
 #include <iostream>
 #include <csignal>
 #include <cstdlib>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -48,6 +49,26 @@ int main(int argc, char* argv[]) {
         pixelscrape::HttpServer http_server(8080);
 
         // API endpoints
+
+        // Serve the web UI
+        http_server.add_route("GET", "/", [](const pixelscrape::HttpRequest& req) {
+            pixelscrape::HttpResponse response;
+            response.headers["Content-Type"] = "text/html";
+
+            std::ifstream file("frontend/index.html");
+            if (file.is_open()) {
+                std::stringstream buffer;
+                buffer << file.rdbuf();
+                response.body = buffer.str();
+                file.close();
+            } else {
+                response.status_code = 500;
+                response.status_message = "Internal Server Error";
+                response.body = "Failed to load index.html";
+            }
+
+            return response;
+        });
         http_server.add_route("GET", "/api/torrents", [&torrent_manager](const pixelscrape::HttpRequest& req) {
             pixelscrape::HttpResponse response;
             response.headers["Content-Type"] = "application/json";
