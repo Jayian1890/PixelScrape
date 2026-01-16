@@ -24,9 +24,11 @@ set(SOURCES
     src/torrent_manager.cpp
     src/bencode/parser.cpp
     src/crypto/sha1.cpp
+    src/crypto/mse_crypto.cpp
     src/torrent/metadata.cpp
     src/tracker/client.cpp
     src/peer/connection.cpp
+    src/peer/extension_protocol.cpp
     src/storage/piece_manager.cpp
     src/storage/state_manager.cpp
     src/api/http_server.cpp

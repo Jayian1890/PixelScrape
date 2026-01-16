@@ -1,6 +1,7 @@
 #include "dht_client.hpp"
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem.hpp>
@@ -9,6 +10,25 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <unistd.h>
+
+namespace {
+std::string node_key_from_endpoint(const std::array<uint8_t, 4> &ip,
+                                   uint16_t port) {
+  std::string key;
+  key.resize(6);
+  key[0] = static_cast<char>(ip[0]);
+  key[1] = static_cast<char>(ip[1]);
+  key[2] = static_cast<char>(ip[2]);
+  key[3] = static_cast<char>(ip[3]);
+  key[4] = static_cast<char>((port >> 8) & 0xFF);
+  key[5] = static_cast<char>(port & 0xFF);
+  return key;
+}
+
+std::string node_key(const pixelscrape::dht::DHTNode &node) {
+  return node_key_from_endpoint(node.ip, node.port);
+}
+} // namespace
 
 namespace pixelscrape {
 namespace dht {
@@ -413,7 +433,7 @@ void DHTClient::save_routing_table() {
 }
 
 void DHTClient::iterative_find_node(const NodeID &target) {
-  auto closest = routing_table_->find_closest_nodes(target, 8);
+  auto closest = routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
 
   for (const auto &node : closest) {
     send_find_node(node, target);
@@ -422,12 +442,22 @@ void DHTClient::iterative_find_node(const NodeID &target) {
 
 void DHTClient::iterative_get_peers(const std::array<uint8_t, 20> &info_hash,
                                     PeerDiscoveryCallback /*callback*/) {
+  std::string hash_key(info_hash.begin(), info_hash.end());
   NodeID target(info_hash);
-  auto closest = routing_table_->find_closest_nodes(target, 8);
+  auto closest = routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
 
-  for (const auto &node : closest) {
-    send_get_peers(node, info_hash);
+  {
+    std::lock_guard<std::mutex> lock(get_peers_mutex_);
+    GetPeersLookupState state;
+    state.target = target;
+    state.info_hash = info_hash;
+    state.shortlist = closest;
+    state.in_flight = 0;
+    state.started_at = std::chrono::steady_clock::now();
+    get_peers_lookups_[hash_key] = std::move(state);
   }
+
+  schedule_get_peers_queries(hash_key);
 }
 
 void DHTClient::send_ping(const DHTNode &node) {
@@ -463,8 +493,9 @@ void DHTClient::send_find_node(const DHTNode &node, const NodeID &target) {
   routing_table_->mark_query_sent(node.id);
 }
 
-void DHTClient::send_get_peers(const DHTNode &node,
-                               const std::array<uint8_t, 20> &info_hash) {
+void DHTClient::send_get_peers(
+  const DHTNode &node, const std::array<uint8_t, 20> &info_hash,
+  std::function<void(const ResponseMessage &)> callback) {
   auto tid = tid_generator_.generate();
   auto query = query::get_peers(own_id_, info_hash, tid);
 
@@ -475,10 +506,114 @@ void DHTClient::send_get_peers(const DHTNode &node,
   pending.target_ip = node.ip;
   pending.target_port = node.port;
   pending.info_hash = info_hash;
+  pending.callback = std::move(callback);
 
   track_query(tid, pending);
   send_message(query.encode(), node.ip, node.port);
   routing_table_->mark_query_sent(node.id);
+}
+
+void DHTClient::schedule_get_peers_queries(const std::string &hash_key) {
+  std::vector<DHTNode> to_query;
+  std::array<uint8_t, 20> info_hash{};
+
+  {
+    std::lock_guard<std::mutex> lock(get_peers_mutex_);
+    auto it = get_peers_lookups_.find(hash_key);
+    if (it == get_peers_lookups_.end()) {
+      return;
+    }
+
+    auto &state = it->second;
+    info_hash = state.info_hash;
+
+    for (const auto &node : state.shortlist) {
+      if (state.in_flight >= DHTConfig::LOOKUP_ALPHA) {
+        break;
+      }
+
+      auto key = node_key(node);
+      if (state.queried_nodes.insert(key).second) {
+        state.in_flight++;
+        to_query.push_back(node);
+      }
+    }
+
+    if (state.in_flight == 0 && to_query.empty()) {
+      get_peers_lookups_.erase(it);
+      return;
+    }
+  }
+
+  for (const auto &node : to_query) {
+    send_get_peers(node, info_hash,
+                   [this, hash_key](const ResponseMessage &response) {
+                     handle_get_peers_lookup_response(hash_key, response);
+                   });
+  }
+}
+
+void DHTClient::handle_get_peers_lookup_response(
+    const std::string &hash_key, const ResponseMessage &response) {
+  bool should_schedule = false;
+
+  {
+    std::lock_guard<std::mutex> lock(get_peers_mutex_);
+    auto it = get_peers_lookups_.find(hash_key);
+    if (it == get_peers_lookups_.end()) {
+      return;
+    }
+
+    auto &state = it->second;
+    if (state.in_flight > 0) {
+      state.in_flight--;
+    }
+
+    if (response.nodes) {
+      std::unordered_set<std::string> seen;
+      seen.reserve(state.shortlist.size() + response.nodes->size());
+      for (const auto &node : state.shortlist) {
+        seen.insert(node_key(node));
+      }
+
+      for (const auto &node : *response.nodes) {
+        if (seen.insert(node_key(node)).second) {
+          state.shortlist.push_back(node);
+        }
+      }
+
+      std::sort(state.shortlist.begin(), state.shortlist.end(),
+                [&state](const DHTNode &a, const DHTNode &b) {
+                  return a.id.distance(state.target) <
+                         b.id.distance(state.target);
+                });
+
+      const size_t max_shortlist = DHTConfig::LOOKUP_K * 4;
+      if (state.shortlist.size() > max_shortlist) {
+        state.shortlist.resize(max_shortlist);
+      }
+    }
+
+    bool has_unqueried = false;
+    for (const auto &node : state.shortlist) {
+      if (state.queried_nodes.find(node_key(node)) ==
+          state.queried_nodes.end()) {
+        has_unqueried = true;
+        break;
+      }
+    }
+
+    if (!has_unqueried && state.in_flight == 0) {
+      get_peers_lookups_.erase(it);
+      return;
+    }
+
+    should_schedule = true;
+  }
+
+  if (should_schedule) {
+    schedule_get_peers_queries(hash_key);
+  }
 }
 
 void DHTClient::send_announce_peer(const DHTNode &node,

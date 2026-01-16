@@ -2,6 +2,8 @@
 
 #include "torrent_metadata.hpp"
 #include "tracker_client.hpp"
+#include "mse_crypto.hpp"
+#include "extension_protocol.hpp"
 #include <array>
 #include <atomic>
 #include <functional>
@@ -51,7 +53,9 @@ public:
   PeerConnection(const TorrentMetadata &metadata,
                  const std::array<uint8_t, 20> &info_hash,
                  const std::array<uint8_t, 20> &peer_id,
-                 const PeerInfo &peer_info, PieceManager &piece_manager);
+                 const PeerInfo &peer_info, PieceManager &piece_manager,
+                 bool enable_encryption = true,
+                 bool enable_extensions = true);
   ~PeerConnection();
 
   // Connection management
@@ -93,10 +97,20 @@ public:
                              const std::vector<uint8_t> &payload);
   void enable_extension_protocol() { supports_extensions_ = true; }
   bool supports_extensions() const { return supports_extensions_; }
+  ExtensionProtocol& get_extension_protocol() { return extension_protocol_; }
+  const ExtensionProtocol& get_extension_protocol() const { return extension_protocol_; }
+  
+  // Encryption (BEP 0008)
+  bool is_encrypted() const { return encryption_enabled_; }
+  void enable_encryption() { encryption_enabled_ = true; }
 
 private:
   void run();
   void handle_message(const PeerMessage &message);
+  void handle_extended_message(const std::vector<uint8_t> &payload);
+  bool perform_mse_handshake();
+  bool send_encrypted(const std::vector<uint8_t>& data);
+  bool recv_encrypted(std::vector<uint8_t>& data, size_t length);
 
   PieceCallback piece_callback_;
   PeerMessage create_message(PeerMessageType type,
@@ -121,6 +135,16 @@ private:
   std::vector<bool> bitfield_;
   std::optional<uint16_t> dht_port_;
   bool supports_extensions_;
+  bool encryption_enabled_;
+  bool peer_supports_extensions_;
+
+  // Encryption
+  std::unique_ptr<MSECrypto> mse_crypto_;
+  bool mse_negotiated_;
+  
+  // Extension protocol
+  ExtensionProtocol extension_protocol_;
+  bool extension_handshake_received_;
 
   mutable std::mutex mutex_;
 };

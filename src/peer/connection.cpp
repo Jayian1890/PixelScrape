@@ -16,13 +16,21 @@ PeerConnection::PeerConnection(const TorrentMetadata &metadata,
                                const std::array<uint8_t, 20> &info_hash,
                                const std::array<uint8_t, 20> &peer_id,
                                const PeerInfo &peer_info,
-                               PieceManager &piece_manager)
+                               PieceManager &piece_manager,
+                               bool enable_encryption,
+                               bool enable_extensions)
     : metadata_(metadata), info_hash_(info_hash), peer_id_(peer_id),
       peer_info_(peer_info), piece_manager_(piece_manager), socket_fd_(-1),
       connected_(false), am_choking_(true), am_interested_(false),
       peer_choking_(true), peer_interested_(false),
       bitfield_(piece_manager_.get_bitfield()), dht_port_(std::nullopt),
-      supports_extensions_(false) {}
+      supports_extensions_(enable_extensions), encryption_enabled_(enable_encryption),
+      peer_supports_extensions_(false), mse_crypto_(nullptr), mse_negotiated_(false),
+      extension_handshake_received_(false) {
+  if (encryption_enabled_) {
+    mse_crypto_ = std::make_unique<MSECrypto>();
+  }
+}
 
 PeerConnection::~PeerConnection() { disconnect(); }
 
@@ -261,9 +269,10 @@ void PeerConnection::handle_message(const PeerMessage &message) {
     }
     break;
   case PeerMessageType::EXTENDED:
-    // Extension protocol messages (BEP 0010)
-    // First byte is extension message ID
-    // Handled by metadata exchange or other extensions
+    // Handle extended messages (BEP 0010)
+    if (!message.payload.empty()) {
+      handle_extended_message(message.payload);
+    }
     break;
   case PeerMessageType::KEEP_ALIVE:
     break;
@@ -345,6 +354,9 @@ bool PeerConnection::perform_handshake() {
   if (std::memcmp(response.data() + 28, info_hash_.data(), 20) != 0)
     return false;
 
+  // Check if peer supports extensions (bit 20 in reserved bytes)
+  peer_supports_extensions_ = (response[25] & 0x10) != 0;
+
   // Send unchoke to allow downloading from us
   send_message(create_message(PeerMessageType::UNCHOKE));
   am_choking_ = false;
@@ -371,6 +383,16 @@ bool PeerConnection::perform_handshake() {
   }
   if (has_pieces) {
     send_message(create_message(PeerMessageType::BITFIELD, bitfield_payload));
+  }
+
+  // Send extended handshake if both support extensions
+  if (supports_extensions_ && peer_supports_extensions_) {
+    auto ext_handshake = extension_protocol_.build_extended_handshake(
+        6881, // Default port
+        "PixelScrape/1.0.0",
+        0 // metadata_size, if we have it
+    );
+    send_extended_message(0, ext_handshake); // 0 = extended handshake
   }
 
   return true;
@@ -416,6 +438,138 @@ void PeerConnection::send_extended_message(
   full_payload.push_back(ext_msg_id);
   full_payload.insert(full_payload.end(), payload.begin(), payload.end());
   send_message(create_message(PeerMessageType::EXTENDED, full_payload));
+}
+
+void PeerConnection::handle_extended_message(const std::vector<uint8_t> &payload) {
+  if (payload.empty()) {
+    return;
+  }
+
+  uint8_t ext_msg_id = payload[0];
+  std::vector<uint8_t> ext_payload(payload.begin() + 1, payload.end());
+
+  // Extended handshake (ID 0)
+  if (ext_msg_id == 0) {
+    if (extension_protocol_.parse_extended_handshake(ext_payload)) {
+      extension_handshake_received_ = true;
+      
+      // Log peer capabilities
+      // Can now use ut_metadata, ut_pex, etc. based on what peer supports
+    }
+    return;
+  }
+
+  // Handle ut_metadata messages
+  if (extension_protocol_.supports_ut_metadata()) {
+    uint8_t ut_metadata_id = extension_protocol_.get_peer_extension_id("ut_metadata");
+    if (ext_msg_id == ut_metadata_id) {
+      ExtensionProtocol::MetadataMessage metadata_msg;
+      if (extension_protocol_.parse_metadata_message(ext_payload, metadata_msg)) {
+        // Handle metadata request/data/reject
+        // This would be used for magnet link support
+        switch (metadata_msg.msg_type) {
+          case 0: // request
+            // TODO: Send metadata piece if we have it
+            break;
+          case 1: // data
+            // TODO: Store received metadata piece
+            break;
+          case 2: // reject
+            // TODO: Handle rejection
+            break;
+        }
+      }
+      return;
+    }
+  }
+
+  // Handle ut_pex messages
+  if (extension_protocol_.supports_ut_pex()) {
+    uint8_t ut_pex_id = extension_protocol_.get_peer_extension_id("ut_pex");
+    if (ext_msg_id == ut_pex_id) {
+      ExtensionProtocol::PexMessage pex_msg;
+      if (extension_protocol_.parse_pex_message(ext_payload, pex_msg)) {
+        // Handle PEX - add new peers to discovered list
+        // TODO: Pass added peers to TorrentManager for connection attempts
+      }
+      return;
+    }
+  }
+}
+
+bool PeerConnection::perform_mse_handshake() {
+  // MSE/PE handshake implementation
+  // This is a complex protocol - simplified version here
+  
+  if (!mse_crypto_ || !encryption_enabled_) {
+    return false;
+  }
+
+  try {
+    // Generate DH keypair
+    mse_crypto_->generate_dh_keypair();
+    auto public_key = mse_crypto_->get_public_key();
+
+    // Send our public key
+    if (send(socket_fd_, public_key.data(), public_key.size(), 0) != 
+        static_cast<ssize_t>(public_key.size())) {
+      return false;
+    }
+
+    // Receive peer's public key (96 bytes)
+    std::vector<uint8_t> peer_public_key(96);
+    if (recv(socket_fd_, peer_public_key.data(), 96, MSG_WAITALL) != 96) {
+      return false;
+    }
+
+    // Compute shared secret
+    if (!mse_crypto_->compute_shared_secret(peer_public_key)) {
+      return false;
+    }
+
+    // Continue with crypto_provide/select exchange
+    auto crypto_provide = mse_crypto_->compute_crypto_provide(
+        info_hash_, mse_crypto_->get_shared_secret());
+
+    // For now, we'll use plaintext mode (crypto_select = 0x01)
+    // Full implementation would negotiate RC4 encryption
+    
+    mse_negotiated_ = true;
+    return true;
+
+  } catch (...) {
+    return false;
+  }
+}
+
+bool PeerConnection::send_encrypted(const std::vector<uint8_t>& data) {
+  if (!mse_crypto_ || !mse_negotiated_) {
+    // Send plaintext
+    return send(socket_fd_, data.data(), data.size(), 0) == 
+           static_cast<ssize_t>(data.size());
+  }
+
+  // Encrypt and send
+  std::vector<uint8_t> encrypted_data = data;
+  mse_crypto_->encrypt(encrypted_data);
+  return send(socket_fd_, encrypted_data.data(), encrypted_data.size(), 0) == 
+         static_cast<ssize_t>(encrypted_data.size());
+}
+
+bool PeerConnection::recv_encrypted(std::vector<uint8_t>& data, size_t length) {
+  data.resize(length);
+  
+  if (recv(socket_fd_, data.data(), length, MSG_WAITALL) != 
+      static_cast<ssize_t>(length)) {
+    return false;
+  }
+
+  if (mse_crypto_ && mse_negotiated_) {
+    // Decrypt
+    mse_crypto_->decrypt(data);
+  }
+
+  return true;
 }
 
 } // namespace pixelscrape

@@ -7,6 +7,7 @@
 #include <functional>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace pixelscrape {
 namespace dht {
@@ -16,6 +17,8 @@ struct DHTConfig {
   static constexpr uint16_t DEFAULT_PORT = 6881;
   static constexpr size_t MAX_NODES = 2000;
   static constexpr size_t BOOTSTRAP_NODES_COUNT = 8;
+  static constexpr size_t LOOKUP_K = 8;
+  static constexpr size_t LOOKUP_ALPHA = 3;
   static constexpr int QUERY_TIMEOUT_SECONDS = 10;
   static constexpr int BOOTSTRAP_RETRY_SECONDS = 30;
   static constexpr int ROUTING_TABLE_REFRESH_MINUTES = 15;
@@ -99,7 +102,9 @@ private:
   void send_ping(const DHTNode &node);
   void send_find_node(const DHTNode &node, const NodeID &target);
   void send_get_peers(const DHTNode &node,
-                      const std::array<uint8_t, 20> &info_hash);
+              const std::array<uint8_t, 20> &info_hash,
+              std::function<void(const ResponseMessage &)> callback =
+                {});
   void send_announce_peer(const DHTNode &node,
                           const std::array<uint8_t, 20> &info_hash,
                           uint16_t port, const std::string &token);
@@ -109,6 +114,11 @@ private:
   std::optional<PendingQuery> get_pending_query(const TransactionID &tid);
   void remove_pending_query(const TransactionID &tid);
   void cleanup_expired_queries();
+
+  // Iterative get_peers lookup helpers
+  void schedule_get_peers_queries(const std::string &hash_key);
+  void handle_get_peers_lookup_response(const std::string &hash_key,
+                                        const ResponseMessage &response);
 
   // Maintenance
   void maintenance_loop();
@@ -140,6 +150,18 @@ private:
   // Peer discovery callbacks
   std::unordered_map<std::string, PeerDiscoveryCallback> peer_callbacks_;
   std::mutex callbacks_mutex_;
+
+  struct GetPeersLookupState {
+    NodeID target;
+    std::array<uint8_t, 20> info_hash;
+    std::vector<DHTNode> shortlist;
+    std::unordered_set<std::string> queried_nodes;
+    size_t in_flight{0};
+    std::chrono::steady_clock::time_point started_at;
+  };
+
+  std::unordered_map<std::string, GetPeersLookupState> get_peers_lookups_;
+  std::mutex get_peers_mutex_;
 
   // Rate limiting (IP -> query count in current second)
   std::unordered_map<std::string,

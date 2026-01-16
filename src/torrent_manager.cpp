@@ -565,10 +565,10 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
         if (peers_copy.size() + new_connections.size() >= 50)
           break;
 
-        // Create new connection
+        // Create new connection with encryption and extensions enabled
         auto peer_conn = std::make_shared<PeerConnection>(
             torrent->metadata, torrent->metadata.info_hash, torrent->peer_id,
-            peer_info, *torrent->piece_manager);
+            peer_info, *torrent->piece_manager, true, true); // enable_encryption, enable_extensions
 
         // Set callbacks
         peer_conn->set_piece_callback([this, torrent_id](
