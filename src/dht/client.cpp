@@ -142,15 +142,22 @@ void DHTClient::find_peers(const std::array<uint8_t, 20> &info_hash,
 }
 
 void DHTClient::announce(const std::array<uint8_t, 20> &info_hash,
-                         uint16_t /*port*/) {
+                         uint16_t port) {
   // Find closest nodes and announce to them
   NodeID target(info_hash);
-  auto closest_nodes = routing_table_->find_closest_nodes(target, 8);
+  auto closest_nodes =
+      routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
 
   for (const auto &node : closest_nodes) {
     // First get peers to obtain token
-    send_get_peers(node, info_hash);
-    // The response handler will trigger announce_peer with the token
+    send_get_peers(
+        node, info_hash,
+        [this, node, info_hash, port](const ResponseMessage &response) {
+          if (!response.token) {
+            return;
+          }
+          send_announce_peer(node, info_hash, port, *response.token);
+        });
   }
 }
 
