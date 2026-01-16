@@ -1,13 +1,13 @@
 #include "dht_client.hpp"
-#include <algorithm>
+
 #include <arpa/inet.h>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem.hpp>
 #include <fstream>
 #include <logging.hpp>
+#include <netdb.h>
 #include <netinet/in.h>
-#include <sys/socket.h>
 #include <unistd.h>
 
 namespace pixelscrape {
@@ -122,7 +122,7 @@ void DHTClient::find_peers(const std::array<uint8_t, 20> &info_hash,
 }
 
 void DHTClient::announce(const std::array<uint8_t, 20> &info_hash,
-                         uint16_t port) {
+                         uint16_t /*port*/) {
   // Find closest nodes and announce to them
   NodeID target(info_hash);
   auto closest_nodes = routing_table_->find_closest_nodes(target, 8);
@@ -137,7 +137,7 @@ void DHTClient::announce(const std::array<uint8_t, 20> &info_hash,
 size_t DHTClient::node_count() const { return routing_table_->size(); }
 
 size_t DHTClient::active_queries() const {
-  std::lock_guard<std::mutex> lock(queries_mutex_);
+  std::lock_guard<std::mutex> lock(const_cast<std::mutex &>(queries_mutex_));
   return pending_queries_.size();
 }
 
@@ -307,9 +307,9 @@ void DHTClient::handle_response(const ResponseMessage &response) {
 void DHTClient::handle_error(const ErrorMessage &error) {
   auto pending = get_pending_query(error.transaction_id);
   if (pending) {
-    pixellib::core::logging::Logger::warn("DHT: Error response: {} - {}",
-                                          static_cast<int>(error.error_code),
-                                          error.error_message);
+    pixellib::core::logging::Logger::warning("DHT: Error response: {} - {}",
+                                             static_cast<int>(error.error_code),
+                                             error.error_message);
 
     // Mark node as failed
     DHTNode node;
@@ -421,7 +421,7 @@ void DHTClient::iterative_find_node(const NodeID &target) {
 }
 
 void DHTClient::iterative_get_peers(const std::array<uint8_t, 20> &info_hash,
-                                    PeerDiscoveryCallback callback) {
+                                    PeerDiscoveryCallback /*callback*/) {
   NodeID target(info_hash);
   auto closest = routing_table_->find_closest_nodes(target, 8);
 

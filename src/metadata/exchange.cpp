@@ -68,7 +68,7 @@ void MetadataExchange::handle_extension_handshake(
 }
 
 void MetadataExchange::handle_metadata_message(
-    const std::vector<uint8_t> &payload, PeerConnection &peer) {
+    const std::vector<uint8_t> &payload, PeerConnection & /*peer*/) {
   if (payload.empty())
     return;
 
@@ -175,8 +175,8 @@ void MetadataExchange::handle_metadata_message(
     }
 
     case MetadataMessageType::REJECT: {
-      pixellib::core::logging::Logger::warn("Metadata: Peer rejected piece {}",
-                                            piece_index);
+      pixellib::core::logging::Logger::warning(
+          "Metadata: Peer rejected piece {}", piece_index);
       // Could try requesting from another peer
       break;
     }
@@ -187,9 +187,9 @@ void MetadataExchange::handle_metadata_message(
   }
 }
 
-void MetadataExchange::request_metadata(PeerConnection &peer) {
+void MetadataExchange::request_metadata(PeerConnection & /*peer*/) {
   if (!metadata_size_ || !peer_ut_metadata_id_) {
-    pixellib::core::logging::Logger::warn(
+    pixellib::core::logging::Logger::warning(
         "Metadata: Cannot request - missing size or peer ID");
     return;
   }
@@ -276,7 +276,7 @@ MetadataExchange::create_extension_handshake(bool supports_metadata) {
 }
 
 std::vector<uint8_t>
-MetadataExchange::create_metadata_request(uint8_t ut_metadata_id,
+MetadataExchange::create_metadata_request(uint8_t /*ut_metadata_id*/,
                                           size_t piece_index) {
   std::ostringstream oss;
   oss << "d";
@@ -289,7 +289,7 @@ MetadataExchange::create_metadata_request(uint8_t ut_metadata_id,
 }
 
 std::vector<uint8_t> MetadataExchange::create_metadata_data(
-    uint8_t ut_metadata_id, size_t piece_index,
+    uint8_t /*ut_metadata_id*/, size_t piece_index,
     const std::vector<uint8_t> &data, size_t total_size) {
   std::ostringstream oss;
   oss << "d";
@@ -306,7 +306,7 @@ std::vector<uint8_t> MetadataExchange::create_metadata_data(
 }
 
 std::vector<uint8_t>
-MetadataExchange::create_metadata_reject(uint8_t ut_metadata_id,
+MetadataExchange::create_metadata_reject(uint8_t /*ut_metadata_id*/,
                                          size_t piece_index) {
   std::ostringstream oss;
   oss << "d";
