@@ -73,6 +73,7 @@ private:
   std::array<uint8_t, 20> generate_peer_id();
 
   std::unordered_map<std::string, std::unique_ptr<Torrent>> torrents_;
+  std::unordered_map<std::string, std::vector<PeerInfo>> pending_magnet_peers_;
   std::string download_dir_;
   StateManager state_manager_;
   std::unique_ptr<dht::DHTClient> dht_client_;
