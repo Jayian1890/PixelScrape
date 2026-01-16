@@ -3,31 +3,6 @@
 #include <chrono>
 #include <json.hpp>
 #include <random>
-#include <unordered_set>
-
-namespace {
-std::string peer_key(const pixelscrape::PeerInfo &peer) {
-  std::string key;
-  key.resize(6);
-  key[0] = static_cast<char>(peer.ip[0]);
-  key[1] = static_cast<char>(peer.ip[1]);
-  key[2] = static_cast<char>(peer.ip[2]);
-  key[3] = static_cast<char>(peer.ip[3]);
-  key[4] = static_cast<char>((peer.port >> 8) & 0xFF);
-  key[5] = static_cast<char>(peer.port & 0xFF);
-  return key;
-}
-
-std::unordered_set<std::string>
-build_peer_set(const std::vector<pixelscrape::PeerInfo> &peers) {
-  std::unordered_set<std::string> seen;
-  seen.reserve(peers.size());
-  for (const auto &peer : peers) {
-    seen.insert(peer_key(peer));
-  }
-  return seen;
-}
-} // namespace
 
 namespace pixelscrape {
 
@@ -132,48 +107,22 @@ std::string TorrentManager::add_magnet_link(const std::string &magnet_uri) {
     oss << std::hex << std::setw(2) << std::setfill('0')
         << static_cast<int>(byte);
   }
-          {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto it = torrents_.find(torrent_id);
-            if (it != torrents_.end()) {
-              Torrent *torrent = it->second.get();
-              std::lock_guard<std::mutex> t_lock(torrent->mutex);
-              for (const auto &peer : peers) {
-                PeerInfo info{peer.ip, peer.port};
-                add_unique_peer(torrent->discovered_peers, info);
-              }
-              torrent->cv.notify_all();
-              return;
-            }
+  std::string torrent_id = oss.str();
 
-            // Torrent not found; store peers for pending magnet
-            }
-          }
+  pixellib::core::logging::Logger::info("Adding magnet link with info hash: {}",
+                                        torrent_id);
 
-          if (torrent) {
-            std::lock_guard<std::mutex> t_lock(torrent->mutex);
-            auto seen = build_peer_set(torrent->discovered_peers);
-            for (const auto &peer : peers) {
-              PeerInfo info{peer.ip, peer.port};
-              if (seen.insert(peer_key(info)).second) {
-                torrent->discovered_peers.push_back(info);
-              }
-            }
-            torrent->cv.notify_all();
-            return;
-          }
+  // Start DHT peer discovery
+  if (dht_client_ && dht_client_->is_running()) {
+    dht_client_->find_peers(
+        info_hash, [torrent_id](const std::array<uint8_t, 20> & /*hash*/,
+                                const std::vector<dht::TorrentPeer> &peers) {
+          pixellib::core::logging::Logger::info(
+              "DHT discovered {} peers for torrent {}", peers.size(),
+              torrent_id);
 
-          {
-            std::lock_guard<std::mutex> lock(mutex_);
-            auto &pending = pending_magnet_peers_[torrent_id];
-            auto seen = build_peer_set(pending);
-            for (const auto &peer : peers) {
-              PeerInfo info{peer.ip, peer.port};
-              if (seen.insert(peer_key(info)).second) {
-                pending.push_back(info);
-              }
-            }
-          }
+          // TODO: Add peers to torrent (would need to implement peer addition)
+          // For now, just log
         });
   }
 
@@ -217,27 +166,6 @@ TorrentManager::add_torrent_impl(TorrentMetadata metadata,
     torrent->downloaded_bytes = saved_state->downloaded_bytes;
     if (!saved_state->file_priorities.empty()) {
       torrent->file_priorities = saved_state->file_priorities;
-    if (!pending_peers.empty()) {
-      std::lock_guard<std::mutex> torrent_lock(torrent->mutex);
-      torrent->discovered_peers.insert(
-          torrent->discovered_peers.end(),
-          std::make_move_iterator(pending_peers.begin()),
-          std::make_move_iterator(pending_peers.end()));
-
-  // Merge any pending DHT peers (from magnet discovery)
-  {
-    std::vector<PeerInfo> pending_peers;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      auto it_pending = pending_magnet_peers_.find(info_hash_hex);
-      if (it_pending != pending_magnet_peers_.end()) {
-        pending_peers = std::move(it_pending->second);
-        pending_magnet_peers_.erase(it_pending);
-      }
-    }
-
-    if (!pending_peers.empty()) {
-      torrent->discovered_peers = std::move(pending_peers);
     }
   }
 

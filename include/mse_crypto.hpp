@@ -50,7 +50,7 @@ public:
 
 private:
     // Diffie-Hellman context
-    std::unique_ptr<DH, decltype(&EVP_PKEY_free)> dh_;
+    std::unique_ptr<DH, decltype(&DH_free)> dh_;
     std::vector<uint8_t> shared_secret_;
 
     // RC4 cipher contexts
