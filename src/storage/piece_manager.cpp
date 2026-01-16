@@ -15,15 +15,22 @@ std::string get_parent_path(const std::string& path) {
     return "";
 }
 
-PieceManager::PieceManager(const TorrentMetadata& metadata, const std::string& download_dir)
+PieceManager::PieceManager(const TorrentMetadata& metadata, const std::string& download_dir, const std::vector<size_t>& file_priorities)
     : metadata_(metadata)
     , download_dir_(download_dir)
+    , file_priorities_(file_priorities)
     , have_pieces_(metadata.piece_hashes.size(), false)
     , active_downloads_(metadata.piece_hashes.size())
     , disk_running_(true)
     , disk_thread_(&PieceManager::disk_worker, this)
 {
     calculate_file_mappings();
+
+    if (file_priorities_.empty()) {
+        file_priorities_.assign(metadata_.files.size(), 1);
+    } else {
+        file_priorities_.resize(metadata_.files.size(), 0);
+    }
 
     try {
         // Create download directory structure
@@ -86,18 +93,36 @@ size_t PieceManager::select_rarest_piece(const std::vector<std::vector<bool>>& p
         }
     }
 
-    // Find rarest piece we don't have
-    size_t rarest_index = SIZE_MAX;
-    size_t min_availability = SIZE_MAX;
-
-    for (size_t i = 0; i < availability.size(); ++i) {
-        if (!have_pieces_[i] && availability[i] > 0 && availability[i] < min_availability) {
-            min_availability = availability[i];
-            rarest_index = i;
+    // Calculate priority for each piece
+    std::vector<size_t> piece_priorities(metadata_.piece_hashes.size(), 0);
+    for (size_t i = 0; i < piece_file_mappings_.size(); ++i) {
+        for (const auto& mapping : piece_file_mappings_[i]) {
+            piece_priorities[i] = std::max(piece_priorities[i], file_priorities_[mapping.file_index]);
         }
     }
 
-    return rarest_index;
+    // Find rarest piece we don't have, preferring higher priority
+    size_t best_index = SIZE_MAX;
+    size_t min_availability = SIZE_MAX;
+    size_t max_priority = 0;
+
+    for (size_t i = 0; i < availability.size(); ++i) {
+        if (!have_pieces_[i] && availability[i] > 0) {
+            bool better = false;
+            if (availability[i] < min_availability) {
+                better = true;
+            } else if (availability[i] == min_availability && piece_priorities[i] > max_priority) {
+                better = true;
+            }
+            if (better) {
+                min_availability = availability[i];
+                max_priority = piece_priorities[i];
+                best_index = i;
+            }
+        }
+    }
+
+    return best_index;
 }
 
 bool PieceManager::request_block(size_t piece_index, size_t block_index, size_t block_size) {
@@ -161,9 +186,12 @@ bool PieceManager::is_piece_complete(size_t piece_index) const {
 bool PieceManager::verify_piece(size_t piece_index) {
     std::lock_guard<std::mutex> lock(pieces_mutex_);
 
-    if (!is_piece_complete(piece_index)) return false;
-
+    // Check if piece is complete without calling is_piece_complete to avoid deadlock
+    if (piece_index >= active_downloads_.size()) return false;
     const auto& download = active_downloads_[piece_index];
+    if (download.blocks_received.empty()) return false;
+    if (!std::all_of(download.blocks_received.begin(), download.blocks_received.end(),
+                      [](bool received) { return received; })) return false;
 
     // Concatenate all blocks
     std::vector<uint8_t> piece_data;
@@ -177,6 +205,14 @@ bool PieceManager::verify_piece(size_t piece_index) {
     // Compare with expected hash
     if (hash == metadata_.piece_hashes[piece_index]) {
         have_pieces_[piece_index] = true;
+
+        // Add write request to disk queue
+        {
+            std::lock_guard<std::mutex> disk_lock(disk_mutex_);
+            disk_queue_.push(DiskRequest{DiskRequest::WRITE, piece_index, 0, piece_data, {}});
+        }
+        disk_cv_.notify_one();
+
         return true;
     }
 

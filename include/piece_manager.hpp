@@ -32,7 +32,7 @@ struct DiskRequest {
 
 class PieceManager {
 public:
-    PieceManager(const TorrentMetadata& metadata, const std::string& download_dir);
+    PieceManager(const TorrentMetadata& metadata, const std::string& download_dir, const std::vector<size_t>& file_priorities = {});
     ~PieceManager();
 
     // Piece management
@@ -64,6 +64,7 @@ private:
 
     const TorrentMetadata& metadata_;
     std::string download_dir_;
+    std::vector<size_t> file_priorities_;
 
     // Piece state
     std::vector<bool> have_pieces_;

@@ -21,7 +21,12 @@ std::vector<PeerInfo> TrackerClient::get_peers(
     std::string url = build_tracker_url(peer_id, port, uploaded, downloaded, left, event, announce_url);
 
     try {
-        auto response = pixellib::core::network::Network::http_get(url);
+        std::string response;
+        if (url.find("https://") == 0) {
+            response = pixellib::core::network::Network::https_get(url);
+        } else {
+            response = pixellib::core::network::Network::http_get(url);
+        }
         if (response.empty()) {
             throw std::runtime_error("Empty tracker response");
         }

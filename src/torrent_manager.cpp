@@ -78,7 +78,7 @@ std::string TorrentManager::add_torrent_impl(TorrentMetadata metadata,
     torrent->tracker = std::make_unique<TrackerClient>(torrent->metadata);
     
     // This part involves disk IO and can be slow
-    torrent->piece_manager = std::make_unique<PieceManager>(torrent->metadata, download_dir_);
+    torrent->piece_manager = std::make_unique<PieceManager>(torrent->metadata, download_dir_, file_priorities);
 
     if (file_priorities.empty()) {
         torrent->file_priorities.assign(torrent->metadata.files.size(), 1);

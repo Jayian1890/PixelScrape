@@ -8,6 +8,7 @@
 #include <vector>
 #include <array>
 #include <functional>
+#include <optional>
 
 namespace pixelscrape {
 
@@ -68,6 +69,10 @@ public:
     bool is_interested() const { return am_interested_; }
     void set_interested(bool interested);
     const std::vector<bool>& get_bitfield() const { return bitfield_; }
+    std::optional<uint16_t> get_dht_port() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return dht_port_;
+    }
 
     // Piece management
     void send_have(size_t piece_index);
@@ -106,6 +111,7 @@ private:
     bool peer_choking_;
     bool peer_interested_;
     std::vector<bool> bitfield_;
+    std::optional<uint16_t> dht_port_;
 
     mutable std::mutex mutex_;
 };

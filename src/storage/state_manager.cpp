@@ -7,6 +7,31 @@
 
 namespace pixelscrape {
 
+namespace {
+
+std::optional<std::chrono::system_clock::time_point> parse_iso8601_utc(const std::string& value) {
+    std::tm tm{};
+    std::istringstream ss(value);
+    ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    if (ss.fail()) {
+        return std::nullopt;
+    }
+
+#if defined(_WIN32)
+    std::time_t t = _mkgmtime(&tm);
+#else
+    std::time_t t = timegm(&tm);
+#endif
+
+    if (t == static_cast<std::time_t>(-1)) {
+        return std::nullopt;
+    }
+
+    return std::chrono::system_clock::from_time_t(t);
+}
+
+} // namespace
+
 StateManager::StateManager(const std::string& state_dir) : state_dir_(state_dir) {
     pixellib::core::filesystem::FileSystem::create_directories(state_dir);
 }
@@ -106,8 +131,11 @@ std::optional<TorrentState> StateManager::load_state(const std::string& info_has
 
         // Load timestamp
         if (auto it = json.find("last_updated"); it && it->is_string()) {
-            // For simplicity, set to now - could parse ISO string
-            state.last_updated = std::chrono::system_clock::now();
+            if (auto parsed = parse_iso8601_utc(it->as_string())) {
+                state.last_updated = *parsed;
+            } else {
+                state.last_updated = std::chrono::system_clock::now();
+            }
         } else {
             state.last_updated = std::chrono::system_clock::now();
         }

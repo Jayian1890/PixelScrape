@@ -28,7 +28,8 @@ PeerConnection::PeerConnection(const TorrentMetadata& metadata,
     , am_interested_(false)
     , peer_choking_(true)
     , peer_interested_(false)
-    , bitfield_(metadata.piece_hashes.size(), false)
+    , bitfield_(piece_manager_.get_bitfield())
+    , dht_port_(std::nullopt)
 {
 }
 
@@ -249,7 +250,11 @@ void PeerConnection::handle_message(const PeerMessage& message) {
             // Handle cancel requests - in a full implementation, remove from request queue
             break;
         case PeerMessageType::PORT:
-            // Handle DHT port (not implemented)
+            if (message.payload.size() >= 2) {
+                uint16_t port_be;
+                std::memcpy(&port_be, message.payload.data(), sizeof(port_be));
+                dht_port_ = ntohs(port_be);
+            }
             break;
         case PeerMessageType::KEEP_ALIVE:
             break;

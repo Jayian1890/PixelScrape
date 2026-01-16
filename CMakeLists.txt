@@ -49,9 +49,8 @@ target_compile_options(pixelscrape PRIVATE
 target_compile_definitions(pixelscrape PRIVATE DOCTEST_CONFIG_DISABLE)
 
 # Link libraries (none needed for pixelLib as it's header-only)
-# target_link_libraries(pixelscrape ...)
-# target_link_libraries(pixelscrape c++) # This line is incorrect, removing it
-target_link_libraries(pixelscrape pthread)
+find_package(OpenSSL REQUIRED)
+target_link_libraries(pixelscrape pthread OpenSSL::SSL OpenSSL::Crypto)
 
 # Install targets
 install(TARGETS pixelscrape DESTINATION bin)

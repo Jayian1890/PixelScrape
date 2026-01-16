@@ -137,6 +137,7 @@ int main(int argc, char* argv[]) {
 
                 auto metainfo_it = json_value.find("metainfo");
                 auto path_it = json_value.find("path");
+                auto magnet_it = json_value.find("magnet");
 
                 if (metainfo_it && metainfo_it->is_string()) {
                     // Simple base64 decode
@@ -166,8 +167,40 @@ int main(int argc, char* argv[]) {
                     torrent_id = torrent_manager.add_torrent_data(decoded_data, file_priorities);
                 } else if (path_it && path_it->is_string()) {
                     torrent_id = torrent_manager.add_torrent(path_it->as_string(), file_priorities);
+                } else if (magnet_it && magnet_it->is_string()) {
+                    std::string magnet = magnet_it->as_string();
+                    // Parse magnet link
+                    if (magnet.find("magnet:?") != 0) {
+                        throw std::runtime_error("Invalid magnet link format");
+                    }
+                    size_t xt_pos = magnet.find("xt=urn:btih:");
+                    if (xt_pos == std::string::npos) {
+                        throw std::runtime_error("Magnet link missing info hash");
+                    }
+                    size_t hash_start = xt_pos + 12;
+                    size_t hash_end = magnet.find('&', hash_start);
+                    if (hash_end == std::string::npos) hash_end = magnet.size();
+                    std::string hash_hex = magnet.substr(hash_start, hash_end - hash_start);
+                    if (hash_hex.size() != 40) {
+                        throw std::runtime_error("Invalid info hash length");
+                    }
+                    std::array<uint8_t, 20> info_hash;
+                    for (size_t i = 0; i < 20; ++i) {
+                        std::string byte_str = hash_hex.substr(i*2, 2);
+                        info_hash[i] = static_cast<uint8_t>(std::stoi(byte_str, nullptr, 16));
+                    }
+                    std::string announce;
+                    size_t tr_pos = magnet.find("&tr=");
+                    if (tr_pos != std::string::npos) {
+                        size_t tr_start = tr_pos + 4;
+                        size_t tr_end = magnet.find('&', tr_start);
+                        if (tr_end == std::string::npos) tr_end = magnet.size();
+                        announce = magnet.substr(tr_start, tr_end - tr_start);
+                    }
+                    // For now, magnet links are not fully supported - need DHT or metadata fetching
+                    throw std::runtime_error("Magnet links require metadata fetching which is not implemented yet");
                 } else {
-                    throw std::runtime_error("Missing torrent path or metainfo");
+                    throw std::runtime_error("Missing torrent path, metainfo, or magnet");
                 }
 
                 pixellib::core::json::JSON result = pixellib::core::json::JSON::object({});
@@ -197,11 +230,11 @@ int main(int argc, char* argv[]) {
             response.headers["Content-Type"] = "application/json";
             response.headers["Access-Control-Allow-Origin"] = "*";
 
-            // Extract torrent ID from path (simplified)
+            // Extract torrent ID from path
             std::string path = req.path;
-            size_t id_pos = path.find("/api/torrents/");
-            if (id_pos != std::string::npos) {
-                std::string torrent_id = path.substr(id_pos + 14); // Length of "/api/torrents/"
+            const std::string prefix = "/api/torrents/";
+            if (path.size() > prefix.size() && path.substr(0, prefix.size()) == prefix) {
+                std::string torrent_id = path.substr(prefix.size());
 
                 bool success = torrent_manager.remove_torrent(torrent_id);
                 pixellib::core::json::JSON result = pixellib::core::json::JSON::object({});
