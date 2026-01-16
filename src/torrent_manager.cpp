@@ -2,10 +2,11 @@
 #include <json.hpp>
 #include <random>
 #include <chrono>
+#include "filesystem.hpp"
 
 namespace pixelscrape {
 
-TorrentManager::TorrentManager(const std::filesystem::path& download_dir, const std::filesystem::path& state_dir)
+TorrentManager::TorrentManager(const std::string& download_dir, const std::string& state_dir)
     : download_dir_(download_dir), state_manager_(state_dir) {}
 
 TorrentManager::~TorrentManager() {
@@ -47,9 +48,10 @@ TorrentManager::~TorrentManager() {
     }
 }
 
-std::string TorrentManager::add_torrent(const std::filesystem::path& torrent_path,
+std::string TorrentManager::add_torrent(const std::string& torrent_path,
                                        const std::vector<size_t>& file_priorities) {
-    auto metadata = TorrentMetadataParser::parse(torrent_path);
+    std::string data = pixellib::core::filesystem::FileSystem::read_file(torrent_path);
+    auto metadata = TorrentMetadataParser::parse(data);
     return add_torrent_impl(std::move(metadata), file_priorities);
 }
 
@@ -461,7 +463,9 @@ void TorrentManager::peer_worker(const std::string& torrent_id) {
                                     auto peers_snapshot = it->second->peers;
                                     for(auto& p : peers_snapshot) {
                                         // Sending HAVE is async/non-blocking ideally, or fast enough
-                                        if(p->is_connected()) p->send_have(index);
+                                        if(p->is_connected()) {
+                                            p->set_have_piece(index, true);
+                                        }
                                     }
                                 }
                             }
@@ -515,30 +519,46 @@ void TorrentManager::peer_worker(const std::string& torrent_id) {
                      size_t rarest_piece = torrent->piece_manager->select_rarest_piece(peer_bitfields);
 
                      if (rarest_piece != SIZE_MAX) {
-                         // Find a peer that has this piece and is unchoked
+                         // Find peers that have this piece and are unchoked
+                         const size_t block_size = 16384; // 16KB blocks
+                         
+                         // Calculate actual piece size for the last piece
+                         size_t piece_size = (rarest_piece == torrent->metadata.piece_hashes.size() - 1) ?
+                             (torrent->metadata.total_length % torrent->metadata.piece_length) : 
+                             torrent->metadata.piece_length;
+                         if (piece_size == 0) piece_size = torrent->metadata.piece_length;
+                         
+                         size_t num_blocks = (piece_size + block_size - 1) / block_size;
+                         
+                         // Try to request blocks from available peers
                          for (auto& peer : torrent->peers) {
                              if (!peer->is_connected()) continue;
+                             
+                             const auto& bitfield = peer->get_bitfield();
+                             if (rarest_piece >= bitfield.size() || !bitfield[rarest_piece]) {
+                                 continue; // Peer doesn't have this piece
+                             }
+                             
                              if (peer->is_choking()) {
                                  // Send interested if not already
-                                 // peer->send_interested(); // Need to implement
+                                 peer->set_interested(true);
                                  continue;
                              }
 
-                             const auto& bitfield = peer->get_bitfield();
-                             if (rarest_piece < bitfield.size() && bitfield[rarest_piece]) {
-                                 // Request blocks
-                                 size_t block_size = 16384;
-                                 size_t piece_length = torrent->metadata.piece_length;
-                                 if (rarest_piece == torrent->metadata.files.size() - 1) { // Last piece calculation simplified
-                                      // Correct calculation should be in PieceManager
+                             // Request up to 4 blocks per iteration from this peer
+                             int blocks_requested = 0;
+                             for (size_t block_idx = 0; block_idx < num_blocks && blocks_requested < 4; ++block_idx) {
+                                 size_t begin = block_idx * block_size;
+                                 size_t length = std::min(block_size, piece_size - begin);
+                                 
+                                 if (torrent->piece_manager->request_block(rarest_piece, block_idx, block_size)) {
+                                     peer->send_request(rarest_piece, begin, length);
+                                     blocks_requested++;
                                  }
-
-                                 // Simply request a block for now
-                                 // A real implementation would manage block requests queue
-                                 if (torrent->piece_manager->request_block(rarest_piece, 0, block_size)) {
-                                     peer->send_request(rarest_piece, 0, block_size);
-                                 }
-                                 break; // Request one block per loop iteration for simplicity
+                             }
+                             
+                             if (blocks_requested > 0) {
+                                 break; // Move to next loop iteration, try other pieces
                              }
                          }
                      }

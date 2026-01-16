@@ -1,9 +1,10 @@
 #pragma once
 
-#include "torrent_metadata.hpp"
-#include "piece_manager.hpp"
-#include <filesystem>
 #include <string>
+#include <vector>
+#include <chrono>
+#include <optional>
+#include <array>
 
 namespace pixelscrape {
 
@@ -18,7 +19,7 @@ struct TorrentState {
 
 class StateManager {
 public:
-    StateManager(const std::filesystem::path& state_dir);
+    StateManager(const std::string& state_dir);
 
     // State management
     bool save_state(const std::string& info_hash_hex, const TorrentState& state);
@@ -30,9 +31,9 @@ public:
     static std::array<uint8_t, 20> hex_to_info_hash(const std::string& hex);
 
 private:
-    std::filesystem::path get_state_file_path(const std::string& info_hash_hex) const;
+    std::string get_state_file_path(const std::string& info_hash_hex) const;
 
-    std::filesystem::path state_dir_;
+    std::string state_dir_;
 };
 
 } // namespace pixelscrape

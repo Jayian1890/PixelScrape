@@ -1,12 +1,21 @@
 #include "piece_manager.hpp"
 #include "sha1.hpp"
 #include <filesystem.hpp>
+#include <logging.hpp>
 #include <algorithm>
 #include <fstream>
 
 namespace pixelscrape {
 
-PieceManager::PieceManager(const TorrentMetadata& metadata, const std::filesystem::path& download_dir)
+std::string get_parent_path(const std::string& path) {
+    size_t pos = path.find_last_of("/\\");
+    if (pos != std::string::npos) {
+        return path.substr(0, pos);
+    }
+    return "";
+}
+
+PieceManager::PieceManager(const TorrentMetadata& metadata, const std::string& download_dir)
     : metadata_(metadata)
     , download_dir_(download_dir)
     , have_pieces_(metadata.piece_hashes.size(), false)
@@ -16,20 +25,43 @@ PieceManager::PieceManager(const TorrentMetadata& metadata, const std::filesyste
 {
     calculate_file_mappings();
 
-    // Create download directory structure
-    pixellib::core::filesystem::FileSystem::create_directories(download_dir);
+    try {
+        // Create download directory structure
+        pixellib::core::filesystem::FileSystem::create_directories(download_dir);
 
-    // Create files with correct sizes
-    for (const auto& file : metadata.files) {
-        std::filesystem::path file_path = download_dir / file.path;
-        pixellib::core::filesystem::FileSystem::create_directories(file_path.parent_path());
+        // Create files with correct sizes
+        for (const auto& file : metadata.files) {
+            std::string file_path = download_dir_ + "/" + file.path;
+            std::string parent_dir = get_parent_path(file_path);
+            if (!parent_dir.empty()) {
+                pixellib::core::filesystem::FileSystem::create_directories(parent_dir);
+            }
 
-        // Create sparse file
-        std::ofstream out_file(file_path, std::ios::binary | std::ios::out);
-        if (file.length > 0) {
-            out_file.seekp(file.length - 1);
-            out_file.put('\0');
+            // Create sparse file
+            try {
+                std::ofstream out_file(file_path, std::ios::binary | std::ios::out);
+                if (!out_file) {
+                    pixellib::core::logging::Logger::error("Failed to create file: {}", file_path);
+                    throw std::runtime_error("Failed to create file: " + file_path);
+                }
+                
+                if (file.length > 0) {
+                    out_file.seekp(file.length - 1);
+                    out_file.put('\0');
+                    if (!out_file) {
+                        pixellib::core::logging::Logger::error("Failed to write sparse file: {}", file_path);
+                        throw std::runtime_error("Failed to write sparse file: " + file_path);
+                    }
+                }
+                out_file.close();
+            } catch (const std::exception& e) {
+                pixellib::core::logging::Logger::error("Exception creating file {}: {}", file_path, e.what());
+                throw;
+            }
         }
+    } catch (const std::exception& e) {
+        pixellib::core::logging::Logger::error("Failed to initialize PieceManager: {}", e.what());
+        throw;
     }
 }
 
@@ -154,25 +186,79 @@ bool PieceManager::verify_piece(size_t piece_index) {
 }
 
 std::vector<uint8_t> PieceManager::read_piece(size_t piece_index) {
-    (void)piece_index;
-    // This would be used for seeding - read piece data from files
-    // Implementation would reconstruct piece from file mappings
-    return {};
+    if (piece_index >= have_pieces_.size() || !have_pieces_[piece_index]) {
+        return {};
+    }
+
+    try {
+        // Calculate piece size
+        size_t piece_size = (piece_index == metadata_.piece_hashes.size() - 1) ?
+            (metadata_.total_length % metadata_.piece_length) : metadata_.piece_length;
+        if (piece_size == 0) piece_size = metadata_.piece_length;
+
+        std::vector<uint8_t> piece_data(piece_size);
+
+        // Read from file mappings
+        size_t offset = 0;
+        for (const auto& mapping : piece_file_mappings_[piece_index]) {
+            std::string file_path = download_dir_ + "/" + metadata_.files[mapping.file_index].path;
+            std::ifstream file(file_path, std::ios::binary);
+            if (!file) {
+                pixellib::core::logging::Logger::error("Failed to open file for reading: {}", file_path);
+                return {};
+            }
+
+            file.seekg(mapping.file_offset);
+            if (!file) {
+                pixellib::core::logging::Logger::error("Failed to seek in file: {}", file_path);
+                return {};
+            }
+
+            file.read(reinterpret_cast<char*>(piece_data.data() + offset), mapping.length);
+            if (file.gcount() != static_cast<std::streamsize>(mapping.length)) {
+                pixellib::core::logging::Logger::error("Failed to read complete block from file: {}", file_path);
+                return {};
+            }
+            offset += mapping.length;
+        }
+
+        return piece_data;
+    } catch (const std::exception& e) {
+        pixellib::core::logging::Logger::error("Exception reading piece {}: {}", piece_index, e.what());
+        return {};
+    }
 }
 
 bool PieceManager::write_piece(size_t piece_index, const std::vector<uint8_t>& data) {
-    // Write piece data to appropriate files based on mappings
-    size_t offset = 0;
-    for (const auto& mapping : piece_file_mappings_[piece_index]) {
-        std::filesystem::path file_path = download_dir_ / metadata_.files[mapping.file_index].path;
-        std::ofstream file(file_path, std::ios::binary | std::ios::in | std::ios::out);
-        if (!file) return false;
+    try {
+        // Write piece data to appropriate files based on mappings
+        size_t offset = 0;
+        for (const auto& mapping : piece_file_mappings_[piece_index]) {
+            std::string file_path = download_dir_ + "/" + metadata_.files[mapping.file_index].path;
+            std::ofstream file(file_path, std::ios::binary | std::ios::in | std::ios::out);
+            if (!file) {
+                pixellib::core::logging::Logger::error("Failed to open file for writing: {}", file_path);
+                return false;
+            }
 
-        file.seekp(metadata_.files[mapping.file_index].offset.value_or(0) + mapping.file_offset);
-        file.write(reinterpret_cast<const char*>(data.data() + offset), mapping.length);
-        offset += mapping.length;
+            file.seekp(mapping.file_offset);
+            if (!file) {
+                pixellib::core::logging::Logger::error("Failed to seek in file for writing: {}", file_path);
+                return false;
+            }
+
+            file.write(reinterpret_cast<const char*>(data.data() + offset), mapping.length);
+            if (!file) {
+                pixellib::core::logging::Logger::error("Failed to write to file: {}", file_path);
+                return false;
+            }
+            offset += mapping.length;
+        }
+        return true;
+    } catch (const std::exception& e) {
+        pixellib::core::logging::Logger::error("Exception writing piece {}: {}", piece_index, e.what());
+        return false;
     }
-    return true;
 }
 
 size_t PieceManager::get_completed_pieces() const {
@@ -233,20 +319,28 @@ void PieceManager::disk_worker() {
 
         if (!disk_running_) break;
 
+        if (disk_queue_.empty()) continue;
+
         DiskRequest request = std::move(disk_queue_.front());
         disk_queue_.pop();
         lock.unlock();
 
-        // Process disk request
-        if (request.type == DiskRequest::READ) {
-            // Read operation
-            auto data = read_piece(request.piece_index);
-            if (request.callback) {
-                request.callback(data);
+        try {
+            // Process disk request
+            if (request.type == DiskRequest::READ) {
+                // Read operation
+                auto data = read_piece(request.piece_index);
+                if (request.callback) {
+                    request.callback(data);
+                }
+            } else if (request.type == DiskRequest::WRITE) {
+                // Write operation
+                if (!write_piece(request.piece_index, request.data)) {
+                    pixellib::core::logging::Logger::error("Failed to write piece {} to disk", request.piece_index);
+                }
             }
-        } else if (request.type == DiskRequest::WRITE) {
-            // Write operation
-            write_piece(request.piece_index, request.data);
+        } catch (const std::exception& e) {
+            pixellib::core::logging::Logger::error("Exception in disk_worker for piece {}: {}", request.piece_index, e.what());
         }
     }
 }

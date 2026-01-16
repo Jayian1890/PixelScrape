@@ -110,30 +110,51 @@ void HttpServer::handle_client(int client_socket) {
 HttpRequest HttpServer::parse_request(int client_socket) {
     HttpRequest request;
     std::string line;
-    char buffer[1024];
+    char buffer[4096];
     ssize_t bytes_read;
+    std::string accumulated_data;
 
-    // Read request line
-    std::string request_line;
-    while ((bytes_read = recv(client_socket, buffer, sizeof(buffer), 0)) > 0) {
-        request_line.append(buffer, bytes_read);
-        size_t pos = request_line.find("\r\n");
-        if (pos != std::string::npos) {
-            line = request_line.substr(0, pos);
-            request_line = request_line.substr(pos + 2);
+    // Read all available data with timeout
+    while (true) {
+        bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
+        if (bytes_read > 0) {
+            accumulated_data.append(buffer, bytes_read);
+        } else {
+            break;
+        }
+
+        // Check if we have a complete header (look for double CRLF)
+        if (accumulated_data.find("\r\n\r\n") != std::string::npos) {
             break;
         }
     }
 
-    if (line.empty()) {
-        throw std::runtime_error("Invalid request");
+    if (accumulated_data.empty()) {
+        throw std::runtime_error("Invalid request: no data received");
     }
 
+    // Split headers and body
+    size_t header_end = accumulated_data.find("\r\n\r\n");
+    std::string header_section = accumulated_data.substr(0, header_end);
+    std::string body_section = (header_end != std::string::npos) ? 
+        accumulated_data.substr(header_end + 4) : "";
+
     // Parse request line
+    std::istringstream header_stream(header_section);
+    std::getline(header_stream, line, '\n');
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+
+    if (line.empty()) {
+        throw std::runtime_error("Invalid request: empty request line");
+    }
+
+    // Parse method and path
     std::istringstream iss(line);
     iss >> request.method >> request.path;
 
-    // Parse query parameters
+    // Parse query parameters from path
     size_t query_pos = request.path.find('?');
     if (query_pos != std::string::npos) {
         std::string query_string = request.path.substr(query_pos + 1);
@@ -152,64 +173,68 @@ HttpRequest HttpServer::parse_request(int client_socket) {
         }
     }
 
-    // Process headers
-    while (true) {
-        size_t pos = request_line.find("\r\n");
-        if (pos == std::string::npos) {
-            // Need more data
-            bytes_read = recv(client_socket, buffer, sizeof(buffer), 0);
-            if (bytes_read <= 0) break;
-            request_line.append(buffer, bytes_read);
-            continue;
+    // Parse headers
+    while (std::getline(header_stream, line, '\n')) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            break; // End of headers
         }
 
-        line = request_line.substr(0, pos);
-        request_line = request_line.substr(pos + 2);
+        // Parse header line
+        size_t colon_pos = line.find(':');
+        if (colon_pos != std::string::npos) {
+            std::string header_name = line.substr(0, colon_pos);
+            std::string header_value = line.substr(colon_pos + 1);
 
-        if (line.empty()) {
-            // End of headers, read body if Content-Length present
-            auto cl_it = request.headers.find("Content-Length");
-                if (cl_it != request.headers.end()) {
-                    size_t content_length = std::stoul(cl_it->second);
-                    if (content_length > 0) {
-                        request.body.resize(content_length);
-                        size_t total_read = 0;
-                        while (total_read < content_length) {
-                            bytes_read = recv(client_socket, &request.body[total_read],
-                                            content_length - total_read, 0);
-                            if (bytes_read <= 0) break;
-                            total_read += bytes_read;
-                        }
-                    }
-                }
-                return request;
-            }
+            // Trim whitespace from both ends
+            header_name.erase(header_name.begin(),
+                std::find_if(header_name.begin(), header_name.end(),
+                    [](unsigned char c) { return !std::isspace(c); }));
+            header_name.erase(std::find_if(header_name.rbegin(), header_name.rend(),
+                [](unsigned char c) { return !std::isspace(c); }).base(), header_name.end());
 
-            // Parse header
-            size_t colon_pos = line.find(':');
-            if (colon_pos != std::string::npos) {
-                std::string header_name = line.substr(0, colon_pos);
-                std::string header_value = line.substr(colon_pos + 1);
+            header_value.erase(header_value.begin(),
+                std::find_if(header_value.begin(), header_value.end(),
+                    [](unsigned char c) { return !std::isspace(c); }));
+            header_value.erase(std::find_if(header_value.rbegin(), header_value.rend(),
+                [](unsigned char c) { return !std::isspace(c); }).base(), header_value.end());
 
-                // Trim whitespace
-                header_name.erase(header_name.begin(),
-                    std::find_if(header_name.begin(), header_name.end(),
-                        [](char c) { return !std::isspace(c); }));
-                header_name.erase(std::find_if(header_name.rbegin(), header_name.rend(),
-                    [](char c) { return !std::isspace(c); }).base(), header_name.end());
-
-                header_value.erase(header_value.begin(),
-                    std::find_if(header_value.begin(), header_value.end(),
-                        [](char c) { return !std::isspace(c); }));
-                header_value.erase(std::find_if(header_value.rbegin(), header_value.rend(),
-                    [](char c) { return !std::isspace(c); }).base(), header_value.end());
-
-                request.headers[header_name] = header_value;
-            }
-
+            request.headers[header_name] = header_value;
+        }
     }
 
-    throw std::runtime_error("Incomplete request");
+    // Read body if Content-Length is present
+    auto cl_it = request.headers.find("Content-Length");
+    if (cl_it != request.headers.end()) {
+        try {
+            size_t content_length = std::stoul(cl_it->second);
+            if (content_length > 0) {
+                // We may have already read some body data
+                if (body_section.size() < content_length) {
+                    // Need to read more
+                    size_t remaining = content_length - body_section.size();
+                    std::vector<char> body_buffer(remaining);
+                    size_t total_read = 0;
+                    while (total_read < remaining) {
+                        bytes_read = recv(client_socket, body_buffer.data() + total_read,
+                                        remaining - total_read, 0);
+                        if (bytes_read <= 0) break;
+                        total_read += bytes_read;
+                    }
+                    body_section.append(body_buffer.data(), total_read);
+                }
+                request.body = body_section.substr(0, content_length);
+            }
+        } catch (const std::exception&) {
+            // Invalid Content-Length, ignore
+        }
+    } else {
+        request.body = body_section;
+    }
+
+    return request;
 }
 
 void HttpServer::send_response(int client_socket, const HttpResponse& response) {

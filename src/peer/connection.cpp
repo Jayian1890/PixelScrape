@@ -217,6 +217,21 @@ void PeerConnection::handle_message(const PeerMessage& message) {
         }
         case PeerMessageType::REQUEST:
             // Handle piece requests (for seeding)
+            if (message.payload.size() >= 12) {
+                uint32_t index = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data()));
+                uint32_t begin = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data() + 4));
+                uint32_t length = ntohl(*reinterpret_cast<const uint32_t*>(message.payload.data() + 8));
+
+                // Check if we have the piece and are not choking
+                if (!am_choking_ && index < bitfield_.size() && bitfield_[index]) {
+                    // Read the piece data from piece manager
+                    auto piece_data = piece_manager_.read_piece(index);
+                    if (!piece_data.empty() && begin + length <= piece_data.size()) {
+                        std::vector<uint8_t> block_data(piece_data.begin() + begin, piece_data.begin() + begin + length);
+                        send_piece(index, begin, block_data);
+                    }
+                }
+            }
             break;
         case PeerMessageType::PIECE:
             // Handle received piece blocks
@@ -231,7 +246,7 @@ void PeerConnection::handle_message(const PeerMessage& message) {
             }
             break;
         case PeerMessageType::CANCEL:
-            // Handle cancel requests
+            // Handle cancel requests - in a full implementation, remove from request queue
             break;
         case PeerMessageType::PORT:
             // Handle DHT port (not implemented)
@@ -304,6 +319,32 @@ bool PeerConnection::perform_handshake() {
     if (std::memcmp(response.data() + 1, protocol, 19) != 0) return false;
     if (std::memcmp(response.data() + 28, info_hash_.data(), 20) != 0) return false;
 
+    // Send unchoke to allow downloading from us
+    send_message(create_message(PeerMessageType::UNCHOKE));
+    am_choking_ = false;
+
+    // Send bitfield if we have any pieces
+    std::vector<uint8_t> bitfield_payload;
+    bool has_pieces = false;
+    int bit_count = 0;
+    uint8_t byte = 0;
+    for (bool has : bitfield_) {
+        if (has) has_pieces = true;
+        if (has) byte |= (1 << (7 - bit_count));
+        bit_count++;
+        if (bit_count == 8) {
+            bitfield_payload.push_back(byte);
+            byte = 0;
+            bit_count = 0;
+        }
+    }
+    if (bit_count > 0) {
+        bitfield_payload.push_back(byte);
+    }
+    if (has_pieces) {
+        send_message(create_message(PeerMessageType::BITFIELD, bitfield_payload));
+    }
+
     return true;
 }
 
@@ -328,6 +369,16 @@ void PeerConnection::send_piece(size_t index, size_t begin, const std::vector<ui
     *reinterpret_cast<uint32_t*>(&payload[4]) = htonl(begin);
     std::memcpy(&payload[8], data.data(), data.size());
     send_message(create_message(PeerMessageType::PIECE, payload));
+}
+
+void PeerConnection::set_have_piece(size_t piece_index, bool have) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (piece_index < bitfield_.size()) {
+        bitfield_[piece_index] = have;
+        if (have) {
+            send_have(piece_index);
+        }
+    }
 }
 
 } // namespace pixelscrape

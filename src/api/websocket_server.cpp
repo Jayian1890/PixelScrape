@@ -2,7 +2,6 @@
 #include "sha1.hpp"
 #include <cstring>
 #include <optional>
-#include <random>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -318,30 +317,45 @@ void WebSocketServer::run() {
             socklen_t client_len = sizeof(client_addr);
             int client_socket = accept(server_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
             if (client_socket >= 0) {
-                // Read handshake request manually for now because http_server_ closes it
+                // Read handshake request
                 char buffer[4096];
-                ssize_t received = recv(client_socket, buffer, sizeof(buffer), 0);
+                ssize_t received = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
                 if (received > 0) {
-                    std::string request_str(buffer, received);
+                    buffer[received] = '\0';
+                    std::string request_str(buffer);
                     HttpRequest request;
                     
-                    std::istringstream iss(request_str);
-                    std::string line;
-                    std::getline(iss, line);
-                    if (line.back() == '\r') line.pop_back();
-                    
-                    std::istringstream line_iss(line);
-                    line_iss >> request.method >> request.path;
-                    
-                    while (std::getline(iss, line) && line != "\r" && !line.empty()) {
-                        if (line.back() == '\r') line.pop_back();
-                        size_t colon = line.find(':');
-                        if (colon != std::string::npos) {
-                            std::string key = line.substr(0, colon);
-                            std::string val = line.substr(colon + 1);
-                            // Trim
-                            val.erase(0, val.find_first_not_of(" "));
-                            request.headers[key] = val;
+                    // Find the end of the request line
+                    size_t line_end = request_str.find("\r\n");
+                    if (line_end != std::string::npos) {
+                        std::string request_line = request_str.substr(0, line_end);
+                        std::istringstream line_iss(request_line);
+                        line_iss >> request.method >> request.path;
+                        
+                        // Parse headers until we find empty line
+                        size_t header_start = line_end + 2;
+                        size_t header_end = request_str.find("\r\n\r\n");
+                        
+                        if (header_end != std::string::npos) {
+                            std::string headers_section = request_str.substr(header_start, header_end - header_start);
+                            std::istringstream headers_stream(headers_section);
+                            std::string header_line;
+                            
+                            while (std::getline(headers_stream, header_line)) {
+                                // Remove trailing \r if present
+                                if (!header_line.empty() && header_line.back() == '\r') {
+                                    header_line.pop_back();
+                                }
+                                
+                                size_t colon = header_line.find(':');
+                                if (colon != std::string::npos) {
+                                    std::string key = header_line.substr(0, colon);
+                                    std::string val = header_line.substr(colon + 1);
+                                    // Trim leading whitespace
+                                    val.erase(0, val.find_first_not_of(" \t"));
+                                    request.headers[key] = val;
+                                }
+                            }
                         }
                     }
                     

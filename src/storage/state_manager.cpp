@@ -7,7 +7,7 @@
 
 namespace pixelscrape {
 
-StateManager::StateManager(const std::filesystem::path& state_dir) : state_dir_(state_dir) {
+StateManager::StateManager(const std::string& state_dir) : state_dir_(state_dir) {
     pixellib::core::filesystem::FileSystem::create_directories(state_dir);
 }
 
@@ -55,7 +55,7 @@ std::optional<TorrentState> StateManager::load_state(const std::string& info_has
             return std::nullopt;
         }
 
-        auto json_str = pixellib::core::filesystem::FileSystem::read_file(file_path.string());
+        auto json_str = pixellib::core::filesystem::FileSystem::read_file(file_path);
         if (json_str.empty()) {
             return std::nullopt;
         }
@@ -121,8 +121,8 @@ std::optional<TorrentState> StateManager::load_state(const std::string& info_has
 bool StateManager::delete_state(const std::string& info_hash_hex) {
     try {
         auto file_path = get_state_file_path(info_hash_hex);
-        if (std::filesystem::exists(file_path)) {
-            std::filesystem::remove(file_path);
+        if (pixellib::core::filesystem::FileSystem::exists(file_path)) {
+            pixellib::core::filesystem::FileSystem::remove(file_path);
         }
         return true;
     } catch (const std::exception&) {
@@ -130,8 +130,8 @@ bool StateManager::delete_state(const std::string& info_hash_hex) {
     }
 }
 
-std::filesystem::path StateManager::get_state_file_path(const std::string& info_hash_hex) const {
-    return state_dir_ / (info_hash_hex + ".json");
+std::string StateManager::get_state_file_path(const std::string& info_hash_hex) const {
+    return state_dir_ + "/" + info_hash_hex + ".json";
 }
 
 std::string StateManager::info_hash_to_hex(const std::array<uint8_t, 20>& info_hash) {

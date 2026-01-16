@@ -8,7 +8,7 @@
 #include <atomic>
 #include <thread>
 #include <condition_variable>
-#include <filesystem>
+#include <string>
 
 namespace pixelscrape {
 
@@ -32,7 +32,7 @@ struct DiskRequest {
 
 class PieceManager {
 public:
-    PieceManager(const TorrentMetadata& metadata, const std::filesystem::path& download_dir);
+    PieceManager(const TorrentMetadata& metadata, const std::string& download_dir);
     ~PieceManager();
 
     // Piece management
@@ -63,7 +63,7 @@ private:
     std::pair<size_t, size_t> get_file_range(size_t piece_index, size_t offset, size_t length) const;
 
     const TorrentMetadata& metadata_;
-    std::filesystem::path download_dir_;
+    std::string download_dir_;
 
     // Piece state
     std::vector<bool> have_pieces_;

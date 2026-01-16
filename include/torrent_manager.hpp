@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <thread>
 #include <atomic>
+#include <string>
 
 namespace pixelscrape {
 
@@ -40,11 +41,11 @@ struct Torrent {
 
 class TorrentManager {
 public:
-    TorrentManager(const std::filesystem::path& download_dir, const std::filesystem::path& state_dir);
+    TorrentManager(const std::string& download_dir, const std::string& state_dir);
     ~TorrentManager();
 
     // Torrent management
-    std::string add_torrent(const std::filesystem::path& torrent_path,
+    std::string add_torrent(const std::string& torrent_path,
                            const std::vector<size_t>& file_priorities = {});
     std::string add_torrent_data(const std::string& data,
                                 const std::vector<size_t>& file_priorities = {});
@@ -68,7 +69,7 @@ private:
     std::array<uint8_t, 20> generate_peer_id();
 
     std::unordered_map<std::string, std::unique_ptr<Torrent>> torrents_;
-    std::filesystem::path download_dir_;
+    std::string download_dir_;
     StateManager state_manager_;
     std::atomic<bool> running_{true};
     mutable std::mutex mutex_;

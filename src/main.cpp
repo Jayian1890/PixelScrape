@@ -2,14 +2,24 @@
 #include "http_server.hpp"
 #include "websocket_server.hpp"
 #include "transmission_rpc.hpp"
-#include <logging.hpp>
-#include <filesystem>
+
+#include "logging.hpp"
+#include "filesystem.hpp"
+
 #include <iostream>
 #include <csignal>
 #include <cstdlib>
 #include <fstream>
+#include <atomic>
+#include <stdexcept>
+#include <sstream>
+#include <thread>
+#include <chrono>
+#include <vector>
+#include <string>
+#include <exception>
 
-namespace fs = std::filesystem;
+namespace fs = pixellib::core::filesystem;
 
 volatile std::atomic<bool> running{true};
 
@@ -31,9 +41,9 @@ int main(int argc, char* argv[]) {
     if (!home_env) {
         throw std::runtime_error("HOME environment variable not set");
     }
-    fs::path config_dir = fs::path(home_env) / ".config" / "pixelscrape";
-    fs::create_directories(config_dir);
-    std::string log_file = (config_dir / "pixelscrape.log").string();
+    std::string config_dir = std::string(home_env) + "/.config/pixelscrape";
+    fs::FileSystem::create_directories(config_dir);
+    std::string log_file = config_dir + "/pixelscrape.log";
     pixellib::core::logging::Logger::set_file_logging(log_file, 10 * 1024 * 1024, 5); // 10MB, 5 files
 
     std::cout << "Starting PixelScrape Torrent Client..." << std::endl;
@@ -41,16 +51,16 @@ int main(int argc, char* argv[]) {
 
     try {
         // Create directories
-        fs::path download_dir = fs::path(home_env) / "Downloads";
-        fs::path state_dir = config_dir / "state";
-        fs::create_directories(download_dir);
-        fs::create_directories(state_dir);
+        std::string download_dir = std::string(home_env) + "/Downloads";
+        std::string state_dir = config_dir + "/state";
+        fs::FileSystem::create_directories(download_dir);
+        fs::FileSystem::create_directories(state_dir);
 
         // Initialize torrent manager
         pixelscrape::TorrentManager torrent_manager(download_dir, state_dir);
 
         // Initialize Transmission RPC handler
-        pixelscrape::TransmissionRpcHandler transmission_handler(torrent_manager);
+        pixelscrape::TransmissionRpcHandler transmission_handler(&torrent_manager);
 
         // Initialize HTTP server
         pixelscrape::HttpServer http_server(8080);
@@ -265,8 +275,11 @@ int main(int argc, char* argv[]) {
         pixellib::core::logging::Logger::info("Shutting down PixelScrape");
 
         // Stop servers
-        ws_server.stop();
         http_server.stop();
+        ws_server.stop();
+        
+        std::cout << "PixelScrape shutdown complete." << std::endl;
+        pixellib::core::logging::Logger::info("PixelScrape shutdown complete");
 
     } catch (const std::exception& e) {
         std::cerr << "\nFatal error: " << e.what() << std::endl;

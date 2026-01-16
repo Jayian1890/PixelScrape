@@ -7,7 +7,6 @@
 #include <atomic>
 #include <vector>
 #include <array>
-#include <queue>
 #include <functional>
 
 namespace pixelscrape {
@@ -74,6 +73,7 @@ public:
     void send_have(size_t piece_index);
     void send_request(size_t index, size_t begin, size_t length);
     void send_piece(size_t index, size_t begin, const std::vector<uint8_t>& data);
+    void set_have_piece(size_t piece_index, bool have);
 
     // Callbacks
     using PieceCallback = std::function<void(size_t index, size_t begin, const std::vector<uint8_t>& data)>;

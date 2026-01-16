@@ -1,7 +1,5 @@
 #include "sha1.hpp"
 #include <cstring>
-#include <sstream>
-#include <iomanip>
 
 namespace pixelscrape {
 

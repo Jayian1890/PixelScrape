@@ -153,6 +153,7 @@ std::vector<TorrentFile> TorrentMetadataParser::parse_files(const BencodeValue& 
             file_path /= std::get<BencodeString>(path_component);
         }
 
+        // Store the offset in the torrent
         files.push_back(TorrentFile{file_path.string(), length, current_offset});
         current_offset += length;
     }

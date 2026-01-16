@@ -2,7 +2,7 @@
 
 namespace pixelscrape {
 
-TransmissionRpcHandler::TransmissionRpcHandler(TorrentManager& torrent_manager)
+TransmissionRpcHandler::TransmissionRpcHandler(TorrentManager* torrent_manager)
     : torrent_manager_(torrent_manager) {}
 
 HttpResponse TransmissionRpcHandler::handle_request(const HttpRequest& req) {
@@ -45,19 +45,30 @@ HttpResponse TransmissionRpcHandler::handle_request(const HttpRequest& req) {
 
 HttpResponse TransmissionRpcHandler::torrent_get(const pixellib::core::json::JSON& args, const pixellib::core::json::JSON& tag) {
     (void)args;
-    auto torrent_ids = torrent_manager_.list_torrents();
+    auto torrent_ids = torrent_manager_->list_torrents();
     pixellib::core::json::JSON torrents_array = pixellib::core::json::JSON::array({});
     
     for (const auto& id : torrent_ids) {
-        auto status = torrent_manager_.get_torrent_status(id);
+        auto status = torrent_manager_->get_torrent_status(id);
         if (status) {
             pixellib::core::json::JSON t = pixellib::core::json::JSON::object({});
             t["id"] = pixellib::core::json::JSON(id);
             t["name"] = status->find("name") ? (*status)["name"] : pixellib::core::json::JSON("Unknown");
             t["totalSize"] = status->find("total_size") ? (*status)["total_size"] : pixellib::core::json::JSON(0.0);
             t["percentDone"] = status->find("completion") ? pixellib::core::json::JSON((*status)["completion"].as_number().to_double() / 100.0) : pixellib::core::json::JSON(0.0);
-            t["rateDownload"] = pixellib::core::json::JSON(0.0); // Not tracked yet in TorrentManager
-            t["rateUpload"] = pixellib::core::json::JSON(0.0);
+            
+            // Use actual download/upload speeds from status
+            double down_rate = 0.0;
+            double up_rate = 0.0;
+            if (auto down_speed = status->find("download_speed"); down_speed && down_speed->is_number()) {
+                down_rate = down_speed->as_number().to_double();
+            }
+            if (auto up_speed = status->find("upload_speed"); up_speed && up_speed->is_number()) {
+                up_rate = up_speed->as_number().to_double();
+            }
+            
+            t["rateDownload"] = pixellib::core::json::JSON(down_rate);
+            t["rateUpload"] = pixellib::core::json::JSON(up_rate);
             t["status"] = (*status)["paused"].as_bool() ? pixellib::core::json::JSON(0.0) : pixellib::core::json::JSON(4.0); // 4 = downloading
             t["peersGettingFromUs"] = status->find("peers") ? (*status)["peers"] : pixellib::core::json::JSON(0.0);
             t["peersSendingToUs"] = status->find("peers") ? (*status)["peers"] : pixellib::core::json::JSON(0.0);
@@ -77,30 +88,31 @@ HttpResponse TransmissionRpcHandler::torrent_add(const pixellib::core::json::JSO
     
     if (metainfo_it && metainfo_it->is_string()) {
         try {
+            // Base64 decode implementation
             static const std::string base64_chars = 
                 "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                 "abcdefghijklmnopqrstuvwxyz"
                 "0123456789+/";
             
-            auto decode = [](const std::string& in) {
-                std::string out;
+            auto decode_base64 = [](const std::string& encoded, const std::string& base64_chars) -> std::string {
+                std::string decoded;
                 std::vector<int> T(256, -1);
                 for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
                 int val = 0, valb = -8;
-                for (unsigned char c : in) {
+                for (unsigned char c : encoded) {
                     if (T[c] == -1) continue;
                     val = (val << 6) + T[c];
                     valb += 6;
                     if (valb >= 0) {
-                        out.push_back(char((val >> valb) & 0xFF));
+                        decoded.push_back(char((val >> valb) & 0xFF));
                         valb -= 8;
                     }
                 }
-                return out;
+                return decoded;
             };
 
-            std::string decoded_data = decode(metainfo_it->as_string());
-            std::string id = torrent_manager_.add_torrent_data(decoded_data);
+            std::string decoded_data = decode_base64(metainfo_it->as_string(), base64_chars);
+            std::string id = torrent_manager_->add_torrent_data(decoded_data);
             
             pixellib::core::json::JSON arguments = pixellib::core::json::JSON::object({});
             pixellib::core::json::JSON torrent_added = pixellib::core::json::JSON::object({});
@@ -113,7 +125,7 @@ HttpResponse TransmissionRpcHandler::torrent_add(const pixellib::core::json::JSO
         }
     } else if (filename_it && filename_it->is_string()) {
         try {
-            std::string id = torrent_manager_.add_torrent(filename_it->as_string());
+            std::string id = torrent_manager_->add_torrent(filename_it->as_string());
             pixellib::core::json::JSON arguments = pixellib::core::json::JSON::object({});
             pixellib::core::json::JSON torrent_added = pixellib::core::json::JSON::object({});
             torrent_added["id"] = pixellib::core::json::JSON(id);
@@ -133,7 +145,7 @@ HttpResponse TransmissionRpcHandler::torrent_remove(const pixellib::core::json::
     if (ids_it && ids_it->is_array()) {
         for (const auto& id_val : ids_it->as_array()) {
             if (id_val.is_string()) {
-                torrent_manager_.remove_torrent(id_val.as_string());
+                torrent_manager_->remove_torrent(id_val.as_string());
             }
         }
         return create_response("success", pixellib::core::json::JSON::object({}), tag);
@@ -146,7 +158,7 @@ HttpResponse TransmissionRpcHandler::torrent_start(const pixellib::core::json::J
     if (ids_it && ids_it->is_array()) {
         for (const auto& id_val : ids_it->as_array()) {
             if (id_val.is_string()) {
-                torrent_manager_.resume_torrent(id_val.as_string());
+                torrent_manager_->resume_torrent(id_val.as_string());
             }
         }
         return create_response("success", pixellib::core::json::JSON::object({}), tag);
@@ -159,7 +171,7 @@ HttpResponse TransmissionRpcHandler::torrent_stop(const pixellib::core::json::JS
     if (ids_it && ids_it->is_array()) {
         for (const auto& id_val : ids_it->as_array()) {
             if (id_val.is_string()) {
-                torrent_manager_.pause_torrent(id_val.as_string());
+                torrent_manager_->pause_torrent(id_val.as_string());
             }
         }
         return create_response("success", pixellib::core::json::JSON::object({}), tag);
