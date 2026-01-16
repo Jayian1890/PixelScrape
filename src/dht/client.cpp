@@ -1,0 +1,621 @@
+#include "dht_client.hpp"
+#include <algorithm>
+#include <arpa/inet.h>
+#include <cstring>
+#include <fcntl.h>
+#include <filesystem.hpp>
+#include <fstream>
+#include <logging.hpp>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+namespace pixelscrape {
+namespace dht {
+
+// Bootstrap nodes
+const std::vector<std::pair<std::string, uint16_t>> &
+DHTConfig::bootstrap_nodes() {
+  static const std::vector<std::pair<std::string, uint16_t>> nodes = {
+      {"router.bittorrent.com", 6881},
+      {"dht.transmissionbt.com", 6881},
+      {"router.utorrent.com", 6881},
+      {"dht.aelitis.com", 6881},
+      {"dht.libtorrent.org", 25401}};
+  return nodes;
+}
+
+// DHTClient implementation
+
+DHTClient::DHTClient(uint16_t port)
+    : port_(port), socket_fd_(-1), running_(false), bootstrapped_(false) {
+  own_id_ = NodeID::generate_random();
+  routing_table_ = std::make_unique<RoutingTable>(own_id_);
+}
+
+DHTClient::~DHTClient() { stop(); }
+
+bool DHTClient::start(const std::string &state_dir) {
+  if (running_)
+    return true;
+
+  state_dir_ = state_dir;
+
+  // Create UDP socket
+  socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
+  if (socket_fd_ < 0) {
+    pixellib::core::logging::Logger::error("DHT: Failed to create socket");
+    return false;
+  }
+
+  // Set non-blocking
+  int flags = fcntl(socket_fd_, F_GETFL, 0);
+  fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK);
+
+  // Bind to port
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = INADDR_ANY;
+  addr.sin_port = htons(port_);
+
+  if (bind(socket_fd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+    pixellib::core::logging::Logger::error("DHT: Failed to bind to port {}",
+                                           port_);
+    close(socket_fd_);
+    socket_fd_ = -1;
+    return false;
+  }
+
+  // Try to load saved routing table
+  load_routing_table(state_dir);
+
+  running_ = true;
+  network_thread_ = std::thread(&DHTClient::run, this);
+  maintenance_thread_ = std::thread(&DHTClient::maintenance_loop, this);
+
+  // Start bootstrap
+  bootstrap();
+
+  pixellib::core::logging::Logger::info(
+      "DHT: Started on port {} with node ID {}", port_,
+      own_id_.to_hex().substr(0, 8) + "...");
+
+  return true;
+}
+
+void DHTClient::stop() {
+  if (!running_)
+    return;
+
+  running_ = false;
+  cv_.notify_all();
+
+  if (network_thread_.joinable()) {
+    network_thread_.join();
+  }
+
+  if (maintenance_thread_.joinable()) {
+    maintenance_thread_.join();
+  }
+
+  if (socket_fd_ >= 0) {
+    close(socket_fd_);
+    socket_fd_ = -1;
+  }
+
+  // Save routing table
+  save_routing_table();
+
+  pixellib::core::logging::Logger::info("DHT: Stopped");
+}
+
+void DHTClient::find_peers(const std::array<uint8_t, 20> &info_hash,
+                           PeerDiscoveryCallback callback) {
+  std::string hash_key(info_hash.begin(), info_hash.end());
+
+  {
+    std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    peer_callbacks_[hash_key] = callback;
+  }
+
+  iterative_get_peers(info_hash, callback);
+}
+
+void DHTClient::announce(const std::array<uint8_t, 20> &info_hash,
+                         uint16_t port) {
+  // Find closest nodes and announce to them
+  NodeID target(info_hash);
+  auto closest_nodes = routing_table_->find_closest_nodes(target, 8);
+
+  for (const auto &node : closest_nodes) {
+    // First get peers to obtain token
+    send_get_peers(node, info_hash);
+    // The response handler will trigger announce_peer with the token
+  }
+}
+
+size_t DHTClient::node_count() const { return routing_table_->size(); }
+
+size_t DHTClient::active_queries() const {
+  std::lock_guard<std::mutex> lock(queries_mutex_);
+  return pending_queries_.size();
+}
+
+void DHTClient::run() {
+  std::vector<uint8_t> buffer(65536);
+
+  while (running_) {
+    sockaddr_in from_addr{};
+    socklen_t from_len = sizeof(from_addr);
+
+    ssize_t received =
+        recvfrom(socket_fd_, buffer.data(), buffer.size(), 0,
+                 reinterpret_cast<sockaddr *>(&from_addr), &from_len);
+
+    if (received > 0) {
+      std::vector<uint8_t> data(buffer.begin(), buffer.begin() + received);
+
+      std::array<uint8_t, 4> from_ip;
+      std::memcpy(from_ip.data(), &from_addr.sin_addr.s_addr, 4);
+      uint16_t from_port = ntohs(from_addr.sin_port);
+
+      // Rate limiting
+      if (!check_rate_limit(from_ip)) {
+        continue;
+      }
+
+      // Try to parse as query
+      auto query = QueryMessage::decode(data);
+      if (query) {
+        handle_query(*query, from_ip, from_port);
+        continue;
+      }
+
+      // Try to parse as response
+      auto response = ResponseMessage::decode(data);
+      if (response) {
+        handle_response(*response);
+        continue;
+      }
+
+      // Try to parse as error
+      auto error = ErrorMessage::decode(data);
+      if (error) {
+        handle_error(*error);
+        continue;
+      }
+    } else if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+      // Error
+      pixellib::core::logging::Logger::error("DHT: recvfrom error: {}",
+                                             strerror(errno));
+    }
+
+    // Small sleep to avoid busy-waiting
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+void DHTClient::handle_query(const QueryMessage &query,
+                             const std::array<uint8_t, 4> &from_ip,
+                             uint16_t from_port) {
+  // Add querying node to routing table
+  DHTNode node;
+  node.id = query.querying_node_id;
+  node.ip = from_ip;
+  node.port = from_port;
+  node.last_seen = std::chrono::steady_clock::now();
+  routing_table_->add_node(node);
+
+  // Handle different query types
+  switch (query.query_type) {
+  case QueryType::PING: {
+    auto resp = response::ping(own_id_, query.transaction_id);
+    send_message(resp.encode(), from_ip, from_port);
+    break;
+  }
+
+  case QueryType::FIND_NODE: {
+    if (query.target_id) {
+      auto closest = routing_table_->find_closest_nodes(*query.target_id, 8);
+      auto resp = response::find_node(own_id_, closest, query.transaction_id);
+      send_message(resp.encode(), from_ip, from_port);
+    }
+    break;
+  }
+
+  case QueryType::GET_PEERS: {
+    if (query.info_hash) {
+      // We don't store peer info, so return closest nodes
+      NodeID target(*query.info_hash);
+      auto closest = routing_table_->find_closest_nodes(target, 8);
+      std::string token = token_manager_.generate_token(from_ip);
+      auto resp = response::get_peers_with_nodes(own_id_, closest, token,
+                                                 query.transaction_id);
+      send_message(resp.encode(), from_ip, from_port);
+    }
+    break;
+  }
+
+  case QueryType::ANNOUNCE_PEER: {
+    if (query.info_hash && query.token) {
+      // Validate token
+      if (token_manager_.validate_token(*query.token, from_ip)) {
+        // Token valid - we would store the peer info here
+        // For now, just send success response
+        auto resp = response::announce_peer(own_id_, query.transaction_id);
+        send_message(resp.encode(), from_ip, from_port);
+      } else {
+        auto err = error::protocol_error(query.transaction_id, "Invalid token");
+        send_message(err.encode(), from_ip, from_port);
+      }
+    }
+    break;
+  }
+  }
+}
+
+void DHTClient::handle_response(const ResponseMessage &response) {
+  // Get pending query
+  auto pending = get_pending_query(response.transaction_id);
+  if (!pending) {
+    return; // Unknown transaction
+  }
+
+  // Add responding node to routing table
+  DHTNode node;
+  node.id = response.responding_node_id;
+  node.ip = pending->target_ip;
+  node.port = pending->target_port;
+  node.last_seen = std::chrono::steady_clock::now();
+  routing_table_->add_node(node);
+  routing_table_->update_last_seen(node.id);
+
+  // Handle response based on query type
+  if (pending->callback) {
+    pending->callback(response);
+  }
+
+  // Add returned nodes to routing table
+  if (response.nodes) {
+    for (const auto &returned_node : *response.nodes) {
+      routing_table_->add_node(returned_node);
+    }
+  }
+
+  // Handle peer values
+  if (response.peers && pending->info_hash) {
+    std::vector<TorrentPeer> torrent_peers;
+    for (const auto &peer : *response.peers) {
+      TorrentPeer tp;
+      tp.ip = peer.ip;
+      tp.port = peer.port;
+      torrent_peers.push_back(tp);
+    }
+
+    std::string hash_key(pending->info_hash->begin(),
+                         pending->info_hash->end());
+    std::lock_guard<std::mutex> lock(callbacks_mutex_);
+    auto cb_it = peer_callbacks_.find(hash_key);
+    if (cb_it != peer_callbacks_.end()) {
+      cb_it->second(*pending->info_hash, torrent_peers);
+    }
+  }
+
+  remove_pending_query(response.transaction_id);
+}
+
+void DHTClient::handle_error(const ErrorMessage &error) {
+  auto pending = get_pending_query(error.transaction_id);
+  if (pending) {
+    pixellib::core::logging::Logger::warn("DHT: Error response: {} - {}",
+                                          static_cast<int>(error.error_code),
+                                          error.error_message);
+
+    // Mark node as failed
+    DHTNode node;
+    node.ip = pending->target_ip;
+    node.port = pending->target_port;
+    // We don't have the node ID from error, so we can't update routing table
+
+    remove_pending_query(error.transaction_id);
+  }
+}
+
+void DHTClient::bootstrap() {
+  pixellib::core::logging::Logger::info("DHT: Starting bootstrap");
+
+  // If we have nodes in routing table, ping them
+  auto existing_nodes = routing_table_->get_all_nodes();
+  if (!existing_nodes.empty()) {
+    pixellib::core::logging::Logger::info("DHT: Pinging {} saved nodes",
+                                          existing_nodes.size());
+    for (const auto &node : existing_nodes) {
+      send_ping(node);
+    }
+
+    // Do a find_node for our own ID to populate routing table
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    iterative_find_node(own_id_);
+
+    bootstrapped_ = true;
+    return;
+  }
+
+  // Bootstrap from public nodes
+  for (const auto &[hostname, port] : DHTConfig::bootstrap_nodes()) {
+    // Resolve hostname (simplified - in production use proper DNS resolution)
+    struct hostent *host = gethostbyname(hostname.c_str());
+    if (!host)
+      continue;
+
+    std::array<uint8_t, 4> ip;
+    std::memcpy(ip.data(), host->h_addr_list[0], 4);
+
+    DHTNode bootstrap_node;
+    bootstrap_node.id = NodeID::generate_random(); // We don't know their ID yet
+    bootstrap_node.ip = ip;
+    bootstrap_node.port = port;
+    bootstrap_node.last_seen = std::chrono::steady_clock::now();
+
+    send_find_node(bootstrap_node, own_id_);
+  }
+
+  // Wait a bit for responses
+  std::this_thread::sleep_for(std::chrono::seconds(5));
+
+  // Do iterative find_node for our own ID
+  iterative_find_node(own_id_);
+
+  bootstrapped_ = true;
+  pixellib::core::logging::Logger::info(
+      "DHT: Bootstrap complete, {} nodes in routing table",
+      routing_table_->size());
+}
+
+bool DHTClient::load_routing_table(const std::string &state_dir) {
+  std::string rt_path = state_dir + "/dht/routing_table.dat";
+
+  std::ifstream file(rt_path, std::ios::binary);
+  if (!file) {
+    return false;
+  }
+
+  std::vector<uint8_t> data((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+  file.close();
+
+  bool success = routing_table_->deserialize(data);
+  if (success) {
+    pixellib::core::logging::Logger::info(
+        "DHT: Loaded routing table with {} nodes", routing_table_->size());
+  }
+
+  return success;
+}
+
+void DHTClient::save_routing_table() {
+  if (state_dir_.empty())
+    return;
+
+  std::string dht_dir = state_dir_ + "/dht";
+  pixellib::core::filesystem::FileSystem::create_directories(dht_dir);
+
+  std::string rt_path = dht_dir + "/routing_table.dat";
+  auto data = routing_table_->serialize();
+
+  std::ofstream file(rt_path, std::ios::binary);
+  if (file) {
+    file.write(reinterpret_cast<const char *>(data.data()), data.size());
+    file.close();
+    pixellib::core::logging::Logger::info(
+        "DHT: Saved routing table with {} nodes", routing_table_->size());
+  }
+}
+
+void DHTClient::iterative_find_node(const NodeID &target) {
+  auto closest = routing_table_->find_closest_nodes(target, 8);
+
+  for (const auto &node : closest) {
+    send_find_node(node, target);
+  }
+}
+
+void DHTClient::iterative_get_peers(const std::array<uint8_t, 20> &info_hash,
+                                    PeerDiscoveryCallback callback) {
+  NodeID target(info_hash);
+  auto closest = routing_table_->find_closest_nodes(target, 8);
+
+  for (const auto &node : closest) {
+    send_get_peers(node, info_hash);
+  }
+}
+
+void DHTClient::send_ping(const DHTNode &node) {
+  auto tid = tid_generator_.generate();
+  auto query = query::ping(own_id_, tid);
+
+  PendingQuery pending;
+  pending.transaction_id = tid;
+  pending.query_type = QueryType::PING;
+  pending.sent_time = std::chrono::steady_clock::now();
+  pending.target_ip = node.ip;
+  pending.target_port = node.port;
+
+  track_query(tid, pending);
+  send_message(query.encode(), node.ip, node.port);
+  routing_table_->mark_query_sent(node.id);
+}
+
+void DHTClient::send_find_node(const DHTNode &node, const NodeID &target) {
+  auto tid = tid_generator_.generate();
+  auto query = query::find_node(own_id_, target, tid);
+
+  PendingQuery pending;
+  pending.transaction_id = tid;
+  pending.query_type = QueryType::FIND_NODE;
+  pending.sent_time = std::chrono::steady_clock::now();
+  pending.target_ip = node.ip;
+  pending.target_port = node.port;
+  pending.lookup_target = target;
+
+  track_query(tid, pending);
+  send_message(query.encode(), node.ip, node.port);
+  routing_table_->mark_query_sent(node.id);
+}
+
+void DHTClient::send_get_peers(const DHTNode &node,
+                               const std::array<uint8_t, 20> &info_hash) {
+  auto tid = tid_generator_.generate();
+  auto query = query::get_peers(own_id_, info_hash, tid);
+
+  PendingQuery pending;
+  pending.transaction_id = tid;
+  pending.query_type = QueryType::GET_PEERS;
+  pending.sent_time = std::chrono::steady_clock::now();
+  pending.target_ip = node.ip;
+  pending.target_port = node.port;
+  pending.info_hash = info_hash;
+
+  track_query(tid, pending);
+  send_message(query.encode(), node.ip, node.port);
+  routing_table_->mark_query_sent(node.id);
+}
+
+void DHTClient::send_announce_peer(const DHTNode &node,
+                                   const std::array<uint8_t, 20> &info_hash,
+                                   uint16_t port, const std::string &token) {
+  auto tid = tid_generator_.generate();
+  auto query = query::announce_peer(own_id_, info_hash, port, token, tid);
+
+  PendingQuery pending;
+  pending.transaction_id = tid;
+  pending.query_type = QueryType::ANNOUNCE_PEER;
+  pending.sent_time = std::chrono::steady_clock::now();
+  pending.target_ip = node.ip;
+  pending.target_port = node.port;
+
+  track_query(tid, pending);
+  send_message(query.encode(), node.ip, node.port);
+}
+
+void DHTClient::track_query(const TransactionID &tid,
+                            const PendingQuery &query) {
+  std::lock_guard<std::mutex> lock(queries_mutex_);
+  pending_queries_[tid] = query;
+}
+
+std::optional<PendingQuery>
+DHTClient::get_pending_query(const TransactionID &tid) {
+  std::lock_guard<std::mutex> lock(queries_mutex_);
+  auto it = pending_queries_.find(tid);
+  if (it != pending_queries_.end()) {
+    return it->second;
+  }
+  return std::nullopt;
+}
+
+void DHTClient::remove_pending_query(const TransactionID &tid) {
+  std::lock_guard<std::mutex> lock(queries_mutex_);
+  pending_queries_.erase(tid);
+}
+
+void DHTClient::cleanup_expired_queries() {
+  std::lock_guard<std::mutex> lock(queries_mutex_);
+  auto now = std::chrono::steady_clock::now();
+
+  for (auto it = pending_queries_.begin(); it != pending_queries_.end();) {
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                       now - it->second.sent_time)
+                       .count();
+
+    if (elapsed > DHTConfig::QUERY_TIMEOUT_SECONDS) {
+      // Mark node as failed
+      DHTNode failed_node;
+      failed_node.ip = it->second.target_ip;
+      failed_node.port = it->second.target_port;
+      // We can't mark as failed without node ID
+
+      it = pending_queries_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void DHTClient::maintenance_loop() {
+  while (running_) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait_for(lock, std::chrono::minutes(1), [this] { return !running_; });
+
+    if (!running_)
+      break;
+
+    cleanup_expired_queries();
+    token_manager_.rotate_secrets();
+    refresh_routing_table();
+    check_node_health();
+    save_routing_table();
+  }
+}
+
+void DHTClient::refresh_routing_table() {
+  auto nodes_to_refresh = routing_table_->get_nodes_needing_refresh();
+
+  for (const auto &node : nodes_to_refresh) {
+    send_ping(node);
+  }
+}
+
+void DHTClient::check_node_health() {
+  // Remove bad nodes
+  auto all_nodes = routing_table_->get_all_nodes();
+  for (const auto &node : all_nodes) {
+    if (node.get_state() == DHTNode::State::BAD) {
+      routing_table_->remove_node(node.id);
+    }
+  }
+}
+
+bool DHTClient::check_rate_limit(const std::array<uint8_t, 4> &ip) {
+  std::lock_guard<std::mutex> lock(rate_limit_mutex_);
+
+  std::string ip_key(ip.begin(), ip.end());
+  auto now = std::chrono::steady_clock::now();
+
+  auto it = rate_limits_.find(ip_key);
+  if (it == rate_limits_.end()) {
+    rate_limits_[ip_key] = {1, now};
+    return true;
+  }
+
+  auto elapsed =
+      std::chrono::duration_cast<std::chrono::seconds>(now - it->second.second)
+          .count();
+
+  if (elapsed >= 1) {
+    // Reset counter
+    it->second = {1, now};
+    return true;
+  }
+
+  if (it->second.first >= DHTConfig::MAX_QUERIES_PER_SECOND) {
+    return false; // Rate limited
+  }
+
+  it->second.first++;
+  return true;
+}
+
+void DHTClient::send_message(const std::vector<uint8_t> &data,
+                             const std::array<uint8_t, 4> &ip, uint16_t port) {
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  std::memcpy(&addr.sin_addr.s_addr, ip.data(), 4);
+  addr.sin_port = htons(port);
+
+  sendto(socket_fd_, data.data(), data.size(), 0,
+         reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+}
+
+} // namespace dht
+} // namespace pixelscrape

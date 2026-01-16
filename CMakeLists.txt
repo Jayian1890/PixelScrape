@@ -32,6 +32,10 @@ set(SOURCES
     src/api/http_server.cpp
     src/api/websocket_server.cpp
     src/api/transmission_rpc.cpp
+    src/dht/node.cpp
+    src/dht/protocol.cpp
+    src/dht/client.cpp
+    src/metadata/exchange.cpp
 )
 
 # Create executable
