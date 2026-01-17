@@ -21,7 +21,8 @@ PeerConnection::PeerConnection(const TorrentMetadata &metadata,
       peer_info_(peer_info), piece_manager_(piece_manager), socket_fd_(-1),
       connected_(false), am_choking_(true), am_interested_(false),
       peer_choking_(true), peer_interested_(false),
-      bitfield_(piece_manager_.get_bitfield()), dht_port_(std::nullopt) {}
+      bitfield_(piece_manager_.get_bitfield()), dht_port_(std::nullopt),
+      handshake_buffer_(), handshake_bytes_received_(0) {}
 
 // Incoming-socket constructor (does NOT start the IO thread or assume the
 // handshake has completed). Caller should perform handshake validation and
@@ -36,7 +37,8 @@ PeerConnection::PeerConnection(int socket_fd, const TorrentMetadata &metadata,
       peer_info_(peer_info), piece_manager_(piece_manager),
       socket_fd_(socket_fd), connected_(false), am_choking_(true),
       am_interested_(false), peer_choking_(true), peer_interested_(false),
-      bitfield_(piece_manager_.get_bitfield()), dht_port_(std::nullopt) {
+      bitfield_(piece_manager_.get_bitfield()), dht_port_(std::nullopt),
+      handshake_buffer_(), handshake_bytes_received_(0) {
   // socket is already established; do not start run-loop until handshake
   // completed by caller via `respond_to_handshake` and `start()`.
 }
@@ -45,6 +47,8 @@ PeerConnection::~PeerConnection() { disconnect(); }
 
 void PeerConnection::disconnect() {
   connected_ = false;
+  handshake_buffer_.clear();
+  handshake_bytes_received_ = 0;
   if (thread_.joinable()) {
     thread_.join();
   }
@@ -142,87 +146,89 @@ bool PeerConnection::receive_handshake_nonblocking() {
   if (socket_fd_ < 0)
     return false;
 
-  // Receive handshake response (expect 68 bytes)
-  // We assume the caller only calls this when data is available.
-  // Ideally we would have a state machine buffering bytes.
-  // For this tactical fix, we try to read non-blocking; if we get
-  // EAGAIN/partial, we technically fail or need state. But since
-  // `connection_worker` uses `select` to wait for read, we can try to peek or
-  // read fully.
+  // Initialize buffer on first call
+  if (handshake_buffer_.empty()) {
+    handshake_buffer_.resize(68);
+    handshake_bytes_received_ = 0;
+  }
 
-  // Quick and dirty: try to read all 68 bytes. If partial, we fail this
-  // attempt. A robust impl would buffer. Given the constraints, let's just
-  // attempt a MSG_PEEK to see if enough data is there? No, just read.
-
-  std::vector<uint8_t> response(68);
-  // Must loop to handle partials if we want to be correct, but let's try
-  // reading once.
-  ssize_t received = recv(socket_fd_, response.data(), response.size(), 0);
+  // Try to read remaining bytes
+  size_t remaining = 68 - handshake_bytes_received_;
+  ssize_t received =
+      recv(socket_fd_, handshake_buffer_.data() + handshake_bytes_received_,
+           remaining, 0);
 
   if (received < 0) {
     if (errno == EAGAIN || errno == EWOULDBLOCK)
-      return false;
-    // Error
+      return false; // Not ready yet, try again later
+    // Real error - reset and fail
+    handshake_buffer_.clear();
+    handshake_bytes_received_ = 0;
     return false;
   }
 
-  // If we didn't get full handshake, we might want to support partial reads.
-  // But for this task scope, let's treat partial handshake as "not ready" and
-  // maybe fail if this happens often. Actually, we can't just return false and
-  // retry recv later unless we buffer previous bytes (tcp stream). Let's rely
-  // on the fact that if select says readable, we might get it all. If not, we
-  // fail the connection to keep logic simple as requested, or we implement
-  // buffering. Let's implement partial buffering for just the handshake?? No,
-  // existing code didn't buffer.
-
-  if (received != 68) {
-    // We read some bytes but not all. If we return false, next read will be
-    // offset. We'd corrupt the stream. So we MUST consume or buffer. Since we
-    // don't have a buffer in this class easily accessible/persistable for
-    // handshake specifically (run loop handles messages) We will just fail the
-    // connection if we get a partial handshake packet.
+  if (received == 0) {
+    // Connection closed
+    handshake_buffer_.clear();
+    handshake_bytes_received_ = 0;
     return false;
   }
 
+  handshake_bytes_received_ += received;
+
+  // Still waiting for more data
+  if (handshake_bytes_received_ < 68)
+    return false;
+
+  // We have all 68 bytes - validate
   const char *protocol = "BitTorrent protocol";
-  if (response[0] != 19)
-    return false;
-  if (std::memcmp(response.data() + 1, protocol, 19) != 0)
-    return false;
-  if (std::memcmp(response.data() + 28, info_hash_.data(), 20) != 0)
-    return false;
+  if (handshake_buffer_[0] != 19)
+    goto fail;
+  if (std::memcmp(handshake_buffer_.data() + 1, protocol, 19) != 0)
+    goto fail;
+  if (std::memcmp(handshake_buffer_.data() + 28, info_hash_.data(), 20) != 0)
+    goto fail;
 
-  // Valid handshake!
+  // Valid handshake! Reset state
+  handshake_buffer_.clear();
+  handshake_bytes_received_ = 0;
 
   // Send unchoke
   send_message(create_message(PeerMessageType::UNCHOKE));
   am_choking_ = false;
 
   // Send bitfield
-  std::vector<uint8_t> bitfield_payload;
-  bool has_pieces = false;
-  int bit_count = 0;
-  uint8_t byte = 0;
-  for (bool has : bitfield_) {
-    if (has)
-      has_pieces = true;
-    if (has)
-      byte |= (1 << (7 - bit_count));
-    bit_count++;
-    if (bit_count == 8) {
-      bitfield_payload.push_back(byte);
-      byte = 0;
-      bit_count = 0;
+  {
+    std::vector<uint8_t> bitfield_payload;
+    bool has_pieces = false;
+    int bit_count = 0;
+    uint8_t byte = 0;
+    for (bool has : bitfield_) {
+      if (has)
+        has_pieces = true;
+      if (has)
+        byte |= (1 << (7 - bit_count));
+      bit_count++;
+      if (bit_count == 8) {
+        bitfield_payload.push_back(byte);
+        byte = 0;
+        bit_count = 0;
+      }
     }
-  }
-  if (bit_count > 0) {
-    bitfield_payload.push_back(byte);
-  }
-  if (has_pieces) {
-    send_message(create_message(PeerMessageType::BITFIELD, bitfield_payload));
+    if (bit_count > 0) {
+      bitfield_payload.push_back(byte);
+    }
+    if (has_pieces) {
+      send_message(create_message(PeerMessageType::BITFIELD, bitfield_payload));
+    }
   }
 
   return true;
+
+fail:
+  handshake_buffer_.clear();
+  handshake_bytes_received_ = 0;
+  return false;
 }
 
 // Keep old connect for backward compat if needed, or replace its gut if no one
@@ -612,6 +618,17 @@ bool PeerConnection::respond_to_handshake(
 void PeerConnection::start() {
   if (connected_)
     return;
+
+  // Restore blocking mode for the I/O thread
+  // The socket was set to non-blocking during connection establishment,
+  // but the run() thread expects blocking I/O (uses MSG_WAITALL)
+  if (socket_fd_ >= 0) {
+    int flags = fcntl(socket_fd_, F_GETFL, 0);
+    if (flags >= 0) {
+      fcntl(socket_fd_, F_SETFL, flags & ~O_NONBLOCK);
+    }
+  }
+
   connected_ = true;
   thread_ = std::thread(&PeerConnection::run, this);
 }

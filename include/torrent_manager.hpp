@@ -67,6 +67,9 @@ public:
   void update_speeds();
   pixellib::core::json::JSON get_global_stats() const;
 
+  // Configuration
+  const std::string& get_download_dir() const { return download_dir_; }
+
 private:
   void tracker_worker(const std::string &torrent_id);
   void peer_worker(const std::string &torrent_id);

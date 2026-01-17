@@ -62,7 +62,8 @@ int main(int argc, char *argv[]) {
     pixelscrape::TorrentManager torrent_manager(download_dir, state_dir);
 
     // Initialize Transmission RPC handler
-    pixelscrape::TransmissionRpcHandler transmission_handler(&torrent_manager);
+    pixelscrape::TransmissionRpcHandler transmission_handler(
+        &torrent_manager, torrent_manager.get_download_dir());
 
     // Initialize HTTP server
     pixelscrape::HttpServer http_server(8080);

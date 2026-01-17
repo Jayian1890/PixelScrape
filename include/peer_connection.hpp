@@ -138,6 +138,10 @@ private:
   std::vector<bool> bitfield_;
   std::optional<uint16_t> dht_port_;
 
+  // Handshake buffering for non-blocking reads
+  std::vector<uint8_t> handshake_buffer_;
+  size_t handshake_bytes_received_;
+
   mutable std::mutex mutex_;
 };
 
