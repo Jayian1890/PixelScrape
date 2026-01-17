@@ -100,6 +100,11 @@ private:
   std::thread connection_thread_;
   std::atomic<bool> connection_worker_running_{true};
 
+  // TCP listener for incoming peer connections
+  void tcp_listener(uint16_t port = 6881);
+  std::thread tcp_listener_thread_;
+  std::atomic<bool> tcp_listener_running_{false};
+
   // Verification management
   struct VerificationRequest {
     std::string torrent_id;
