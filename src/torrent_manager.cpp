@@ -201,9 +201,62 @@ TorrentManager::add_torrent_impl(TorrentMetadata metadata,
       std::thread(&TorrentManager::peer_worker, this, torrent_id);
 
   // Add to torrents map
+  std::array<uint8_t, 20> info_hash;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     torrents_[torrent_id] = std::move(torrent);
+    auto it = torrents_.find(torrent_id);
+    if (it != torrents_.end()) {
+      info_hash = it->second->metadata.info_hash;
+    }
+  }
+
+  // Kick off DHT peer discovery for this torrent if DHT is available
+  if (dht_client_ && dht_client_->is_running()) {
+    dht_client_->find_peers(
+        /*info_hash=*/info_hash,
+        [this, torrent_id](const std::array<uint8_t, 20> & /*hash*/,
+                           const std::vector<dht::TorrentPeer> &peers) {
+          pixellib::core::logging::Logger::info(
+              "DHT discovered {} peers for torrent {}", peers.size(),
+              torrent_id);
+
+          std::vector<PeerInfo> new_peers;
+          for (const auto &dht_peer : peers) {
+            PeerInfo pi;
+            pi.ip = dht_peer.ip;
+            pi.port = dht_peer.port;
+            new_peers.push_back(pi);
+          }
+
+          // Determine if torrent exists and add or buffer peers accordingly
+          Torrent *torrent_ptr = nullptr;
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = torrents_.find(torrent_id);
+            if (it != torrents_.end()) {
+              torrent_ptr = it->second.get();
+            } else {
+              auto &pending = pending_magnet_peers_[torrent_id];
+              size_t added = add_unique_peers(pending, new_peers);
+              if (added > 0) {
+                pixellib::core::logging::Logger::info(
+                    "DHT buffered {} new peers for pending torrent {}",
+                    added, torrent_id);
+              }
+            }
+          }
+
+          if (torrent_ptr) {
+            std::lock_guard<std::mutex> t_lock(torrent_ptr->mutex);
+            size_t added = add_unique_peers(torrent_ptr->discovered_peers, new_peers);
+            if (added > 0) {
+              pixellib::core::logging::Logger::info(
+                  "DHT discovered {} new peers for active torrent {}",
+                  added, torrent_id);
+            }
+          }
+        });
   }
 
   pixellib::core::logging::Logger::info("Added torrent: {}", torrent_id);
