@@ -1,7 +1,7 @@
 #include "dht_client.hpp"
 
-#include <arpa/inet.h>
 #include <algorithm>
+#include <arpa/inet.h>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem.hpp>
@@ -139,26 +139,6 @@ void DHTClient::find_peers(const std::array<uint8_t, 20> &info_hash,
   }
 
   iterative_get_peers(info_hash, callback);
-}
-
-void DHTClient::announce(const std::array<uint8_t, 20> &info_hash,
-                         uint16_t port) {
-  // Find closest nodes and announce to them
-  NodeID target(info_hash);
-  auto closest_nodes =
-      routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
-
-  for (const auto &node : closest_nodes) {
-    // First get peers to obtain token
-    send_get_peers(
-        node, info_hash,
-        [this, node, info_hash, port](const ResponseMessage &response) {
-          if (!response.token) {
-            return;
-          }
-          send_announce_peer(node, info_hash, port, *response.token);
-        });
-  }
 }
 
 size_t DHTClient::node_count() const { return routing_table_->size(); }
@@ -302,6 +282,11 @@ void DHTClient::handle_response(const ResponseMessage &response) {
     pending->callback(response);
   }
 
+  // Handle iterative lookup
+  if (pending->associated_lookup) {
+    handle_lookup_response(response.transaction_id, response);
+  }
+
   // Add returned nodes to routing table
   if (response.nodes) {
     for (const auto &returned_node : *response.nodes) {
@@ -310,7 +295,12 @@ void DHTClient::handle_response(const ResponseMessage &response) {
   }
 
   // Handle peer values
-  if (response.peers && pending->info_hash) {
+  // Use associated_lookup to get info_hash if present
+  auto info_hash = pending->associated_lookup
+                       ? pending->associated_lookup->info_hash
+                       : std::nullopt;
+
+  if (response.peers && info_hash) {
     std::vector<TorrentPeer> torrent_peers;
     for (const auto &peer : *response.peers) {
       TorrentPeer tp;
@@ -319,12 +309,18 @@ void DHTClient::handle_response(const ResponseMessage &response) {
       torrent_peers.push_back(tp);
     }
 
-    std::string hash_key(pending->info_hash->begin(),
-                         pending->info_hash->end());
+    std::string hash_key(info_hash->begin(), info_hash->end());
     std::lock_guard<std::mutex> lock(callbacks_mutex_);
     auto cb_it = peer_callbacks_.find(hash_key);
     if (cb_it != peer_callbacks_.end()) {
-      cb_it->second(*pending->info_hash, torrent_peers);
+      cb_it->second(*info_hash, torrent_peers);
+    }
+
+    // Also notify lookup callback if it exists (for individual result
+    // processing? usually we aggregate)
+    if (pending->associated_lookup &&
+        pending->associated_lookup->peers_callback) {
+      pending->associated_lookup->peers_callback(*info_hash, torrent_peers);
     }
   }
 
@@ -440,31 +436,198 @@ void DHTClient::save_routing_table() {
 }
 
 void DHTClient::iterative_find_node(const NodeID &target) {
-  auto closest = routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
+  auto lookup = std::make_shared<LookupState>();
+  lookup->id = tid_generator_.generate();
+  lookup->target = target;
+  lookup->type = QueryType::FIND_NODE;
+  lookup->shortlist =
+      routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
+  lookup->started_at = std::chrono::steady_clock::now();
 
-  for (const auto &node : closest) {
-    send_find_node(node, target);
-  }
+  start_lookup(lookup);
 }
 
 void DHTClient::iterative_get_peers(const std::array<uint8_t, 20> &info_hash,
-                                    PeerDiscoveryCallback /*callback*/) {
-  std::string hash_key(info_hash.begin(), info_hash.end());
+                                    PeerDiscoveryCallback callback) {
   NodeID target(info_hash);
-  auto closest = routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
+  auto lookup = std::make_shared<LookupState>();
+  lookup->id = tid_generator_.generate();
+  lookup->target = target;
+  lookup->type = QueryType::GET_PEERS;
+  lookup->info_hash = info_hash;
+  lookup->peers_callback = callback;
+  lookup->shortlist =
+      routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
+  lookup->started_at = std::chrono::steady_clock::now();
 
-  {
-    std::lock_guard<std::mutex> lock(get_peers_mutex_);
-    GetPeersLookupState state;
-    state.target = target;
-    state.info_hash = info_hash;
-    state.shortlist = closest;
-    state.in_flight = 0;
-    state.started_at = std::chrono::steady_clock::now();
-    get_peers_lookups_[hash_key] = std::move(state);
+  start_lookup(lookup);
+}
+
+void DHTClient::start_lookup(std::shared_ptr<LookupState> lookup) {
+  std::lock_guard<std::mutex> lock(lookups_mutex_);
+  active_lookups_[lookup->id] = lookup;
+  continue_lookup(lookup);
+}
+
+void DHTClient::continue_lookup(std::shared_ptr<LookupState> lookup) {
+  // Sort shortlist by distance to target
+  std::sort(lookup->shortlist.begin(), lookup->shortlist.end(),
+            [&lookup](const DHTNode &a, const DHTNode &b) {
+              return a.id.distance(lookup->target) <
+                     b.id.distance(lookup->target);
+            });
+
+  // Remove duplicates (simple check by ID)
+  auto last = std::unique(
+      lookup->shortlist.begin(), lookup->shortlist.end(),
+      [](const DHTNode &a, const DHTNode &b) { return a.id == b.id; });
+  lookup->shortlist.erase(last, lookup->shortlist.end());
+
+  // Cap shortlist
+  if (lookup->shortlist.size() > DHTConfig::LOOKUP_K * 4) {
+    lookup->shortlist.resize(DHTConfig::LOOKUP_K * 4);
   }
 
-  schedule_get_peers_queries(hash_key);
+  // Count active or queried nodes among the K closest
+  int active_count = 0;
+  for (size_t i = 0;
+       i < std::min(lookup->shortlist.size(), DHTConfig::LOOKUP_K); ++i) {
+    if (lookup->queried_nodes.count(node_key(lookup->shortlist[i]))) {
+      active_count++;
+    }
+  }
+
+  // Termination condition logic could go here, but for now we just keep
+  // querying until alpha limit
+
+  std::vector<DHTNode> to_query;
+  for (const auto &node : lookup->shortlist) {
+    if (lookup->in_flight >= DHTConfig::LOOKUP_ALPHA)
+      break;
+
+    std::string key = node_key(node);
+    if (lookup->queried_nodes.find(key) == lookup->queried_nodes.end()) {
+      lookup->queried_nodes.insert(key);
+      lookup->in_flight++;
+      to_query.push_back(node);
+    }
+  }
+
+  // Send queries
+  for (const auto &node : to_query) {
+    if (lookup->type == QueryType::FIND_NODE) {
+      send_find_node(node, lookup->target, lookup);
+    } else if (lookup->type == QueryType::GET_PEERS && lookup->info_hash) {
+      send_get_peers(node, *lookup->info_hash, {}, lookup);
+    }
+  }
+
+  // Check for termination
+  if (lookup->in_flight == 0 &&
+      active_count == static_cast<int>(lookup->queried_nodes.size())) {
+
+    // Finished
+    {
+      std::lock_guard<std::mutex> lock(lookups_mutex_);
+      active_lookups_.erase(lookup->id);
+    }
+
+    if (lookup->type == QueryType::FIND_NODE && lookup->nodes_callback) {
+      lookup->nodes_callback(lookup->shortlist);
+    } else if (lookup->type == QueryType::GET_PEERS && lookup->info_hash) {
+      // Fire peers callback with empty list to signal completion?
+      // Or just use announce_callback if set.
+      if (lookup->announce_callback) {
+        lookup->announce_callback(lookup->shortlist);
+      }
+    }
+  }
+}
+
+void DHTClient::handle_lookup_response(const TransactionID &tid,
+                                       const ResponseMessage &response) {
+  auto pending = get_pending_query(tid);
+  if (!pending || !pending->associated_lookup) {
+    return;
+  }
+
+  auto lookup = pending->associated_lookup;
+
+  // Add responding node to responding set
+  DHTNode node;
+  node.id = response.responding_node_id;
+  node.ip = pending->target_ip;
+  node.port = pending->target_port;
+  lookup->responding_nodes.insert(node_key(node));
+
+  // Collect token if present (for announce)
+  if (response.token) {
+    lookup->collected_tokens[node_key(node)] = *response.token;
+  }
+
+  if (lookup->in_flight > 0) {
+    lookup->in_flight--;
+  }
+
+  // Add discovered nodes to shortlist
+  if (response.nodes) {
+    std::unordered_set<std::string> seen;
+    for (const auto &existing : lookup->shortlist) {
+      seen.insert(node_key(existing));
+    }
+
+    for (const auto &n : *response.nodes) {
+      if (seen.find(node_key(n)) == seen.end()) {
+        lookup->shortlist.push_back(n);
+        seen.insert(node_key(n));
+      }
+    }
+  }
+
+  // Continue
+  continue_lookup(lookup);
+}
+
+void DHTClient::announce(const std::array<uint8_t, 20> &info_hash,
+                         uint16_t port) {
+  // Phase 1: Iterative lookup to find closest nodes and gather tokens
+  NodeID target(info_hash);
+  auto lookup = std::make_shared<LookupState>();
+  lookup->id = tid_generator_.generate();
+  lookup->target = target;
+  lookup->type =
+      QueryType::GET_PEERS; // We use GET_PEERS to find nodes + get tokens
+  lookup->info_hash = info_hash;
+  lookup->shortlist =
+      routing_table_->find_closest_nodes(target, DHTConfig::LOOKUP_K);
+  lookup->started_at = std::chrono::steady_clock::now();
+
+  // Callback when lookup finishes (or stabilizes)
+  std::weak_ptr<LookupState> weak_lookup = lookup;
+  lookup->announce_callback = [this, info_hash, port,
+                               weak_lookup](const std::vector<DHTNode> &nodes) {
+    if (auto l = weak_lookup.lock()) {
+      for (const auto &node : nodes) {
+        std::string key = node_key(node);
+        auto it = l->collected_tokens.find(key);
+        if (it != l->collected_tokens.end()) {
+          send_announce_peer(node, info_hash, port, it->second);
+        } else {
+          // If we don't have a token, we could try to get one, but for now just
+          // skip In a robust impl we would do a one-hop get_peers here.
+          send_get_peers(
+              node, info_hash,
+              [this, node, info_hash, port](const ResponseMessage &resp) {
+                if (resp.token) {
+                  send_announce_peer(node, info_hash, port, *resp.token);
+                }
+              });
+        }
+      }
+    }
+  };
+
+  start_lookup(lookup);
 }
 
 void DHTClient::send_ping(const DHTNode &node) {
@@ -483,7 +646,8 @@ void DHTClient::send_ping(const DHTNode &node) {
   routing_table_->mark_query_sent(node.id);
 }
 
-void DHTClient::send_find_node(const DHTNode &node, const NodeID &target) {
+void DHTClient::send_find_node(const DHTNode &node, const NodeID &target,
+                               std::shared_ptr<LookupState> lookup) {
   auto tid = tid_generator_.generate();
   auto query = query::find_node(own_id_, target, tid);
 
@@ -493,7 +657,7 @@ void DHTClient::send_find_node(const DHTNode &node, const NodeID &target) {
   pending.sent_time = std::chrono::steady_clock::now();
   pending.target_ip = node.ip;
   pending.target_port = node.port;
-  pending.lookup_target = target;
+  pending.associated_lookup = lookup;
 
   track_query(tid, pending);
   send_message(query.encode(), node.ip, node.port);
@@ -501,8 +665,9 @@ void DHTClient::send_find_node(const DHTNode &node, const NodeID &target) {
 }
 
 void DHTClient::send_get_peers(
-  const DHTNode &node, const std::array<uint8_t, 20> &info_hash,
-  std::function<void(const ResponseMessage &)> callback) {
+    const DHTNode &node, const std::array<uint8_t, 20> &info_hash,
+    std::function<void(const ResponseMessage &)> callback,
+    std::shared_ptr<LookupState> lookup) {
   auto tid = tid_generator_.generate();
   auto query = query::get_peers(own_id_, info_hash, tid);
 
@@ -512,115 +677,12 @@ void DHTClient::send_get_peers(
   pending.sent_time = std::chrono::steady_clock::now();
   pending.target_ip = node.ip;
   pending.target_port = node.port;
-  pending.info_hash = info_hash;
+  pending.associated_lookup = lookup;
   pending.callback = std::move(callback);
 
   track_query(tid, pending);
   send_message(query.encode(), node.ip, node.port);
   routing_table_->mark_query_sent(node.id);
-}
-
-void DHTClient::schedule_get_peers_queries(const std::string &hash_key) {
-  std::vector<DHTNode> to_query;
-  std::array<uint8_t, 20> info_hash{};
-
-  {
-    std::lock_guard<std::mutex> lock(get_peers_mutex_);
-    auto it = get_peers_lookups_.find(hash_key);
-    if (it == get_peers_lookups_.end()) {
-      return;
-    }
-
-    auto &state = it->second;
-    info_hash = state.info_hash;
-
-    for (const auto &node : state.shortlist) {
-      if (state.in_flight >= DHTConfig::LOOKUP_ALPHA) {
-        break;
-      }
-
-      auto key = node_key(node);
-      if (state.queried_nodes.insert(key).second) {
-        state.in_flight++;
-        to_query.push_back(node);
-      }
-    }
-
-    if (state.in_flight == 0 && to_query.empty()) {
-      get_peers_lookups_.erase(it);
-      return;
-    }
-  }
-
-  for (const auto &node : to_query) {
-    send_get_peers(node, info_hash,
-                   [this, hash_key](const ResponseMessage &response) {
-                     handle_get_peers_lookup_response(hash_key, response);
-                   });
-  }
-}
-
-void DHTClient::handle_get_peers_lookup_response(
-    const std::string &hash_key, const ResponseMessage &response) {
-  bool should_schedule = false;
-
-  {
-    std::lock_guard<std::mutex> lock(get_peers_mutex_);
-    auto it = get_peers_lookups_.find(hash_key);
-    if (it == get_peers_lookups_.end()) {
-      return;
-    }
-
-    auto &state = it->second;
-    if (state.in_flight > 0) {
-      state.in_flight--;
-    }
-
-    if (response.nodes) {
-      std::unordered_set<std::string> seen;
-      seen.reserve(state.shortlist.size() + response.nodes->size());
-      for (const auto &node : state.shortlist) {
-        seen.insert(node_key(node));
-      }
-
-      for (const auto &node : *response.nodes) {
-        if (seen.insert(node_key(node)).second) {
-          state.shortlist.push_back(node);
-        }
-      }
-
-      std::sort(state.shortlist.begin(), state.shortlist.end(),
-                [&state](const DHTNode &a, const DHTNode &b) {
-                  return a.id.distance(state.target) <
-                         b.id.distance(state.target);
-                });
-
-      const size_t max_shortlist = DHTConfig::LOOKUP_K * 4;
-      if (state.shortlist.size() > max_shortlist) {
-        state.shortlist.resize(max_shortlist);
-      }
-    }
-
-    bool has_unqueried = false;
-    for (const auto &node : state.shortlist) {
-      if (state.queried_nodes.find(node_key(node)) ==
-          state.queried_nodes.end()) {
-        has_unqueried = true;
-        break;
-      }
-    }
-
-    if (!has_unqueried && state.in_flight == 0) {
-      get_peers_lookups_.erase(it);
-      return;
-    }
-
-    should_schedule = true;
-  }
-
-  if (should_schedule) {
-    schedule_get_peers_queries(hash_key);
-  }
 }
 
 void DHTClient::send_announce_peer(const DHTNode &node,

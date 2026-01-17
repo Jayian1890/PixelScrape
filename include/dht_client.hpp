@@ -2,7 +2,8 @@
 
 #include "dht_node.hpp"
 #include "dht_protocol.hpp"
-#include <atomic>
+#include <memory>
+
 #include <condition_variable>
 #include <functional>
 #include <thread>
@@ -40,6 +41,30 @@ using PeerDiscoveryCallback =
     std::function<void(const std::array<uint8_t, 20> &info_hash,
                        const std::vector<TorrentPeer> &peers)>;
 
+// Unified iterative lookup state
+struct LookupState {
+  TransactionID id; // internal ID for this lookup
+  NodeID target;
+  QueryType type;                                      // FIND_NODE or GET_PEERS
+  std::map<std::string, std::string> collected_tokens; // Node key -> Token
+  std::optional<std::array<uint8_t, 20>> info_hash;    // For GET_PEERS/ANNOUNCE
+
+  // Search state
+  std::vector<DHTNode> shortlist;
+  std::unordered_set<std::string> queried_nodes;
+  std::unordered_set<std::string> responding_nodes;
+  size_t in_flight{0};
+
+  // Completion callbacks
+  std::function<void(const std::vector<DHTNode> &)>
+      nodes_callback;                   // For FIND_NODE
+  PeerDiscoveryCallback peers_callback; // For GET_PEERS
+  std::function<void(const std::vector<DHTNode> &)>
+      announce_callback; // For ANNOUNCE phase 1
+
+  std::chrono::steady_clock::time_point started_at;
+};
+
 // Pending query tracker
 struct PendingQuery {
   TransactionID transaction_id;
@@ -49,8 +74,7 @@ struct PendingQuery {
   uint16_t target_port;
 
   // For iterative lookups
-  std::optional<NodeID> lookup_target;
-  std::optional<std::array<uint8_t, 20>> info_hash;
+  std::shared_ptr<LookupState> associated_lookup;
   std::function<void(const ResponseMessage &)> callback;
 };
 
@@ -100,11 +124,12 @@ private:
 
   // Query sending
   void send_ping(const DHTNode &node);
-  void send_find_node(const DHTNode &node, const NodeID &target);
-  void send_get_peers(const DHTNode &node,
-              const std::array<uint8_t, 20> &info_hash,
-              std::function<void(const ResponseMessage &)> callback =
-                {});
+  void send_find_node(const DHTNode &node, const NodeID &target,
+                      std::shared_ptr<LookupState> lookup = nullptr);
+  void
+  send_get_peers(const DHTNode &node, const std::array<uint8_t, 20> &info_hash,
+                 std::function<void(const ResponseMessage &)> callback = {},
+                 std::shared_ptr<LookupState> lookup = nullptr);
   void send_announce_peer(const DHTNode &node,
                           const std::array<uint8_t, 20> &info_hash,
                           uint16_t port, const std::string &token);
@@ -115,10 +140,11 @@ private:
   void remove_pending_query(const TransactionID &tid);
   void cleanup_expired_queries();
 
-  // Iterative get_peers lookup helpers
-  void schedule_get_peers_queries(const std::string &hash_key);
-  void handle_get_peers_lookup_response(const std::string &hash_key,
-                                        const ResponseMessage &response);
+  // Iterative lookup helpers
+  void start_lookup(std::shared_ptr<LookupState> lookup);
+  void continue_lookup(std::shared_ptr<LookupState> lookup);
+  void handle_lookup_response(const TransactionID &tid,
+                              const ResponseMessage &response);
 
   // Maintenance
   void maintenance_loop();
@@ -151,17 +177,11 @@ private:
   std::unordered_map<std::string, PeerDiscoveryCallback> peer_callbacks_;
   std::mutex callbacks_mutex_;
 
-  struct GetPeersLookupState {
-    NodeID target;
-    std::array<uint8_t, 20> info_hash;
-    std::vector<DHTNode> shortlist;
-    std::unordered_set<std::string> queried_nodes;
-    size_t in_flight{0};
-    std::chrono::steady_clock::time_point started_at;
-  };
+  // Unified iterative lookup state
 
-  std::unordered_map<std::string, GetPeersLookupState> get_peers_lookups_;
-  std::mutex get_peers_mutex_;
+  std::unordered_map<TransactionID, std::shared_ptr<LookupState>>
+      active_lookups_;
+  std::mutex lookups_mutex_;
 
   // Rate limiting (IP -> query count in current second)
   std::unordered_map<std::string,

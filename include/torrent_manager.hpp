@@ -23,6 +23,7 @@ struct Torrent {
   std::unique_ptr<PieceManager> piece_manager;
   std::vector<std::shared_ptr<PeerConnection>> peers;
   std::vector<PeerInfo> discovered_peers;
+  std::unordered_set<std::string> pending_connections; // Key: peer_key()
   std::array<uint8_t, 20> peer_id;
   std::thread tracker_thread;
   std::thread peer_thread;
@@ -84,12 +85,7 @@ private:
   mutable std::mutex mutex_;
 
   // Connection management
-  enum class ConnectionState {
-    CONNECTING,
-    HANDSHAKING,
-    COMPLETED,
-    FAILED
-  };
+  enum class ConnectionState { CONNECTING, HANDSHAKING, COMPLETED, FAILED };
 
   struct ConnectionRequest {
     std::string torrent_id;
