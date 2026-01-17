@@ -54,6 +54,9 @@ TorrentManager::TorrentManager(const std::string &download_dir,
 
   // Start connection worker thread
   connection_thread_ = std::thread(&TorrentManager::connection_worker, this);
+
+  // Start verification worker thread
+  verification_thread_ = std::thread(&TorrentManager::verification_worker, this);
 }
 
 TorrentManager::~TorrentManager() {
@@ -65,6 +68,16 @@ TorrentManager::~TorrentManager() {
   }
   if (connection_thread_.joinable()) {
     connection_thread_.join();
+  }
+
+  // Stop verification worker
+  {
+    std::lock_guard<std::mutex> lock(verification_mutex_);
+    verification_worker_running_ = false;
+    verification_cv_.notify_one();
+  }
+  if (verification_thread_.joinable()) {
+    verification_thread_.join();
   }
 
   if (dht_client_) {
@@ -736,19 +749,11 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
             if (it->second->piece_manager->receive_block(index, begin, data)) {
               it->second->downloaded_bytes += data.size();
               if (it->second->piece_manager->is_piece_complete(index)) {
-                if (it->second->piece_manager->verify_piece(index)) {
-                  // Piece verified!
-                  // Send HAVE to all peers
-                  // Use a copy to avoid iterating while modified or locking
-                  // issues
-                  auto peers_snapshot = it->second->peers;
-                  for (auto &p : peers_snapshot) {
-                    // Sending HAVE is async/non-blocking ideally, or fast
-                    // enough
-                    if (p->is_connected()) {
-                      p->set_have_piece(index, true);
-                    }
-                  }
+                // Submit verification request to the verification worker
+                {
+                  std::lock_guard<std::mutex> v_lock(verification_mutex_);
+                  verification_queue_.push({torrent_id, index});
+                  verification_cv_.notify_one();
                 }
               }
             }
@@ -863,6 +868,54 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
       if (torrent->cv.wait_for(t_lock, std::chrono::milliseconds(100),
                                [&]() { return torrent->stopping; }))
         break;
+    }
+  }
+}
+
+void TorrentManager::verification_worker() {
+  while (verification_worker_running_) {
+    VerificationRequest request;
+
+    {
+      std::unique_lock<std::mutex> lock(verification_mutex_);
+      verification_cv_.wait(lock, [this]() {
+        return !verification_queue_.empty() || !verification_worker_running_;
+      });
+
+      if (!verification_worker_running_) {
+        break;
+      }
+
+      if (verification_queue_.empty()) {
+        continue;
+      }
+
+      request = std::move(verification_queue_.front());
+      verification_queue_.pop();
+    }
+
+    // Process the verification request
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = torrents_.find(request.torrent_id);
+    if (it != torrents_.end()) {
+      if (it->second->piece_manager->verify_piece(request.piece_index)) {
+        // Piece verified successfully!
+        // Send HAVE to all peers
+        auto peers_snapshot = it->second->peers;
+        for (auto &peer : peers_snapshot) {
+          if (peer->is_connected()) {
+            peer->set_have_piece(request.piece_index, true);
+          }
+        }
+
+        pixellib::core::logging::Logger::info(
+            "Piece {} verified successfully for torrent {}",
+            request.piece_index, request.torrent_id.substr(0, 8));
+      } else {
+        pixellib::core::logging::Logger::warning(
+            "Piece {} verification failed for torrent {}",
+            request.piece_index, request.torrent_id.substr(0, 8));
+      }
     }
   }
 }
