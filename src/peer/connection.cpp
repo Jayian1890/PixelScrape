@@ -28,7 +28,8 @@ PeerConnection::PeerConnection(const TorrentMetadata &metadata,
       mse_crypto_(nullptr), mse_negotiated_(false),
       extension_handshake_received_(false), metadata_exchange_(info_hash),
       handshake_started_(false), handshake_complete_(false),
-      handshake_success_(false), handshake_send_pos_(0), handshake_recv_pos_(0) {
+      handshake_success_(false), handshake_send_pos_(0),
+      handshake_recv_pos_(0) {
   if (encryption_enabled_) {
     mse_crypto_ = std::make_unique<MSECrypto>();
   }
@@ -47,7 +48,8 @@ PeerConnection::PeerConnection(const std::array<uint8_t, 20> &info_hash,
       mse_crypto_(nullptr), mse_negotiated_(false),
       extension_handshake_received_(false), metadata_exchange_(info_hash),
       handshake_started_(false), handshake_complete_(false),
-      handshake_success_(false), handshake_send_pos_(0), handshake_recv_pos_(0) {
+      handshake_success_(false), handshake_send_pos_(0),
+      handshake_recv_pos_(0) {
   if (encryption_enabled_) {
     mse_crypto_ = std::make_unique<MSECrypto>();
   }
@@ -86,8 +88,10 @@ bool PeerConnection::connect() {
 }
 
 bool PeerConnection::is_connect_complete() {
-  if (connected_) return true;
-  if (socket_fd_ < 0) return false;
+  if (connected_)
+    return true;
+  if (socket_fd_ < 0)
+    return false;
 
   // Check if connection completed
   int error;
@@ -284,6 +288,10 @@ void PeerConnection::handle_message(const PeerMessage &message) {
       std::vector<uint8_t> data(message.payload.begin() + 8,
                                 message.payload.end());
 
+      if (pending_requests_ > 0) {
+        pending_requests_--;
+      }
+
       if (piece_callback_) {
         piece_callback_(index, begin, data);
       }
@@ -449,20 +457,24 @@ bool PeerConnection::start_handshake() {
 
   // Protocol string
   const char *protocol = "BitTorrent protocol";
-  handshake_send_buffer_.insert(handshake_send_buffer_.end(), protocol, protocol + 19);
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(), protocol,
+                                protocol + 19);
 
   // Reserved bytes (8 bytes) - set extension bit if supported
   std::array<uint8_t, 8> reserved = {0};
   if (supports_extensions_) {
     reserved[5] |= 0x10; // Extension protocol bit (BEP 0010)
   }
-  handshake_send_buffer_.insert(handshake_send_buffer_.end(), reserved.begin(), reserved.end());
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(), reserved.begin(),
+                                reserved.end());
 
   // Info hash (20 bytes)
-  handshake_send_buffer_.insert(handshake_send_buffer_.end(), info_hash_.begin(), info_hash_.end());
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(),
+                                info_hash_.begin(), info_hash_.end());
 
   // Peer ID (20 bytes)
-  handshake_send_buffer_.insert(handshake_send_buffer_.end(), peer_id_.begin(), peer_id_.end());
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(), peer_id_.begin(),
+                                peer_id_.end());
 
   handshake_recv_buffer_.resize(68);
   handshake_send_pos_ = 0;
@@ -481,10 +493,9 @@ bool PeerConnection::continue_handshake() {
 
   // Send handshake data
   while (handshake_send_pos_ < handshake_send_buffer_.size()) {
-    ssize_t sent = send(socket_fd_,
-                       handshake_send_buffer_.data() + handshake_send_pos_,
-                       handshake_send_buffer_.size() - handshake_send_pos_,
-                       0);
+    ssize_t sent =
+        send(socket_fd_, handshake_send_buffer_.data() + handshake_send_pos_,
+             handshake_send_buffer_.size() - handshake_send_pos_, 0);
     if (sent < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         return false; // Would block, try again later
@@ -498,10 +509,9 @@ bool PeerConnection::continue_handshake() {
 
   // Receive handshake response
   while (handshake_recv_pos_ < handshake_recv_buffer_.size()) {
-    ssize_t received = recv(socket_fd_,
-                           handshake_recv_buffer_.data() + handshake_recv_pos_,
-                           handshake_recv_buffer_.size() - handshake_recv_pos_,
-                           0);
+    ssize_t received =
+        recv(socket_fd_, handshake_recv_buffer_.data() + handshake_recv_pos_,
+             handshake_recv_buffer_.size() - handshake_recv_pos_, 0);
     if (received < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         return false; // Would block, try again later
@@ -524,12 +534,14 @@ bool PeerConnection::continue_handshake() {
     handshake_success_ = false;
     return true;
   }
-  if (std::memcmp(handshake_recv_buffer_.data() + 1, "BitTorrent protocol", 19) != 0) {
+  if (std::memcmp(handshake_recv_buffer_.data() + 1, "BitTorrent protocol",
+                  19) != 0) {
     handshake_complete_ = true;
     handshake_success_ = false;
     return true;
   }
-  if (std::memcmp(handshake_recv_buffer_.data() + 28, info_hash_.data(), 20) != 0) {
+  if (std::memcmp(handshake_recv_buffer_.data() + 28, info_hash_.data(), 20) !=
+      0) {
     handshake_complete_ = true;
     handshake_success_ = false;
     return true;
@@ -599,6 +611,7 @@ void PeerConnection::send_request(size_t index, size_t begin, size_t length) {
   *reinterpret_cast<uint32_t *>(&payload[0]) = htonl(index);
   *reinterpret_cast<uint32_t *>(&payload[4]) = htonl(begin);
   *reinterpret_cast<uint32_t *>(&payload[8]) = htonl(length);
+  pending_requests_++;
   send_message(create_message(PeerMessageType::REQUEST, payload));
 }
 

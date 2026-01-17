@@ -241,19 +241,20 @@ TorrentManager::add_torrent_impl(TorrentMetadata metadata,
               size_t added = add_unique_peers(pending, new_peers);
               if (added > 0) {
                 pixellib::core::logging::Logger::info(
-                    "DHT buffered {} new peers for pending torrent {}",
-                    added, torrent_id);
+                    "DHT buffered {} new peers for pending torrent {}", added,
+                    torrent_id);
               }
             }
           }
 
           if (torrent_ptr) {
             std::lock_guard<std::mutex> t_lock(torrent_ptr->mutex);
-            size_t added = add_unique_peers(torrent_ptr->discovered_peers, new_peers);
+            size_t added =
+                add_unique_peers(torrent_ptr->discovered_peers, new_peers);
             if (added > 0) {
               pixellib::core::logging::Logger::info(
-                  "DHT discovered {} new peers for active torrent {}",
-                  added, torrent_id);
+                  "DHT discovered {} new peers for active torrent {}", added,
+                  torrent_id);
             }
           }
         });
@@ -974,6 +975,8 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
           // requests)
         } else {
           // Downloading
+          // Parallel Download Strategy
+          // Gather bitfields for rarity calculation
           std::vector<std::vector<bool>> peer_bitfields;
           for (const auto &peer : torrent->peers) {
             if (peer->is_connected()) {
@@ -981,57 +984,64 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
             }
           }
 
-          size_t rarest_piece =
-              torrent->piece_manager->select_rarest_piece(peer_bitfields);
+          // Iterate all peers to keep pipelines full
+          for (auto &peer : torrent->peers) {
+            if (!peer->is_connected())
+              continue;
 
-          if (rarest_piece != SIZE_MAX) {
-            // Find peers that have this piece and are unchoked
-            const size_t block_size = 16384; // 16KB blocks
-
-            // Calculate actual piece size for the last piece
-            size_t piece_size =
-                (rarest_piece == torrent->metadata.piece_hashes.size() - 1)
-                    ? (torrent->metadata.total_length %
-                       torrent->metadata.piece_length)
-                    : torrent->metadata.piece_length;
-            if (piece_size == 0)
-              piece_size = torrent->metadata.piece_length;
-
-            size_t num_blocks = (piece_size + block_size - 1) / block_size;
-
-            // Try to request blocks from available peers
-            for (auto &peer : torrent->peers) {
-              if (!peer->is_connected())
-                continue;
-
-              const auto &bitfield = peer->get_bitfield();
-              if (rarest_piece >= bitfield.size() || !bitfield[rarest_piece]) {
-                continue; // Peer doesn't have this piece
-              }
-
-              if (peer->is_choking()) {
-                // Send interested if not already
+            if (peer->is_choking()) {
+              // Express interest if we are not choking
+              if (!peer->is_interested()) {
                 peer->set_interested(true);
-                continue;
               }
+              continue;
+            }
 
-              // Request up to 4 blocks per iteration from this peer
-              int blocks_requested = 0;
-              for (size_t block_idx = 0;
-                   block_idx < num_blocks && blocks_requested < 4;
-                   ++block_idx) {
+            if (!peer->is_interested()) {
+              peer->set_interested(true);
+            }
+
+            // Pipeline requests (target 5 pending)
+            while (peer->get_pending_request_count() < 5) {
+              const auto &bitfield = peer->get_bitfield();
+              size_t rarest_piece = torrent->piece_manager->select_rarest_piece(
+                  peer_bitfields, &bitfield);
+
+              if (rarest_piece == SIZE_MAX)
+                break; // No pieces we need from this peer
+
+              // Calculate piece details
+              const size_t block_size = 16384; // 16KB blocks
+              size_t piece_size =
+                  (rarest_piece == torrent->metadata.piece_hashes.size() - 1)
+                      ? (torrent->metadata.total_length %
+                         torrent->metadata.piece_length)
+                      : torrent->metadata.piece_length;
+              if (piece_size == 0)
+                piece_size = torrent->metadata.piece_length;
+
+              size_t num_blocks = (piece_size + block_size - 1) / block_size;
+              int blocks_requested_from_piece = 0;
+
+              for (size_t block_idx = 0; block_idx < num_blocks; ++block_idx) {
+                if (peer->get_pending_request_count() >= 5)
+                  break;
+
                 size_t begin = block_idx * block_size;
                 size_t length = std::min(block_size, piece_size - begin);
 
                 if (torrent->piece_manager->request_block(
                         rarest_piece, block_idx, block_size)) {
                   peer->send_request(rarest_piece, begin, length);
-                  blocks_requested++;
+                  blocks_requested_from_piece++;
                 }
               }
 
-              if (blocks_requested > 0) {
-                break; // Move to next loop iteration, try other pieces
+              if (blocks_requested_from_piece == 0) {
+                // If we couldn't request any blocks (e.g. all taken),
+                // the piece should be marked fully requested next time.
+                // Break to avoid busy loop if piece manager state is stale.
+                break;
               }
             }
           }
@@ -1042,7 +1052,7 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
     // Sleep a bit to avoid busy loop
     {
       std::unique_lock<std::mutex> t_lock(torrent->mutex);
-      if (torrent->cv.wait_for(t_lock, std::chrono::milliseconds(100),
+      if (torrent->cv.wait_for(t_lock, std::chrono::milliseconds(10),
                                [&]() { return torrent->stopping; }))
         break;
     }

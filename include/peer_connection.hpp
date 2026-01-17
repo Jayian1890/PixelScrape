@@ -89,6 +89,7 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     return dht_port_;
   }
+  size_t get_pending_request_count() const { return pending_requests_; }
 
   // Piece management
   void send_have(size_t piece_index);
@@ -154,6 +155,7 @@ private:
   bool am_interested_;
   bool peer_choking_;
   bool peer_interested_;
+  std::atomic<size_t> pending_requests_{0};
   std::vector<bool> bitfield_;
   std::optional<uint16_t> dht_port_;
   bool supports_extensions_;
