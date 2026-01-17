@@ -1648,15 +1648,15 @@ TARGET = $(BIN_DIR)/myapp
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-@mkdir -p $(BIN_DIR)
-$(CXX) $(OBJECTS) $(LDFLAGS) -o $@
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(OBJECTS) $(LDFLAGS) -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp
-@mkdir -p $(OBJ_DIR)
-$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 clean:
-rm -rf $(OBJ_DIR) $(BIN_DIR)
+	rm -rf $(OBJ_DIR) $(BIN_DIR)
 ```
 
 ---
