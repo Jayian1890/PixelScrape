@@ -3,6 +3,44 @@
 #include <chrono>
 #include <json.hpp>
 #include <random>
+#include <unordered_set>
+
+namespace {
+std::string peer_key(const pixelscrape::PeerInfo &peer) {
+  std::string key;
+  key.resize(6);
+  key[0] = static_cast<char>(peer.ip[0]);
+  key[1] = static_cast<char>(peer.ip[1]);
+  key[2] = static_cast<char>(peer.ip[2]);
+  key[3] = static_cast<char>(peer.ip[3]);
+  key[4] = static_cast<char>((peer.port >> 8) & 0xFF);
+  key[5] = static_cast<char>(peer.port & 0xFF);
+  return key;
+}
+
+std::unordered_set<std::string>
+build_peer_set(const std::vector<pixelscrape::PeerInfo> &peers) {
+  std::unordered_set<std::string> seen;
+  seen.reserve(peers.size());
+  for (const auto &peer : peers) {
+    seen.insert(peer_key(peer));
+  }
+  return seen;
+}
+
+size_t add_unique_peers(std::vector<pixelscrape::PeerInfo> &existing_peers,
+                        const std::vector<pixelscrape::PeerInfo> &new_peers) {
+  auto seen = build_peer_set(existing_peers);
+  size_t added_count = 0;
+  for (const auto &np : new_peers) {
+    if (seen.insert(peer_key(np)).second) {
+      existing_peers.push_back(np);
+      added_count++;
+    }
+  }
+  return added_count;
+}
+} // namespace
 
 namespace pixelscrape {
 
@@ -74,6 +112,74 @@ TorrentManager::add_torrent_data(const std::string &data,
   return add_torrent_impl(std::move(metadata), file_priorities);
 }
 
+std::string TorrentManager::add_torrent_impl(TorrentMetadata metadata,
+                                             const std::vector<size_t> &file_priorities) {
+  std::string torrent_id = StateManager::info_hash_to_hex(metadata.info_hash);
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (torrents_.find(torrent_id) != torrents_.end()) {
+      throw std::runtime_error("Torrent already exists");
+    }
+  }
+
+  // Create torrent object
+  auto torrent = std::make_unique<Torrent>();
+  torrent->metadata = std::move(metadata);
+  torrent->peer_id = generate_peer_id();
+  torrent->file_priorities = file_priorities.empty()
+                                 ? std::vector<size_t>(torrent->metadata.files.size(), 1)
+                                 : file_priorities;
+
+  // Create piece manager
+  torrent->piece_manager = std::make_unique<PieceManager>(
+      torrent->metadata, download_dir_, torrent->file_priorities);
+
+  // Create tracker client
+  torrent->tracker = std::make_unique<TrackerClient>(torrent->metadata);
+
+  // Load saved state if available
+  if (auto saved_state = state_manager_.load_state(torrent_id)) {
+    torrent->piece_manager->load_state(saved_state->bitfield);
+    torrent->uploaded_bytes = saved_state->uploaded_bytes;
+    torrent->downloaded_bytes = saved_state->downloaded_bytes;
+    torrent->file_priorities = saved_state->file_priorities;
+  }
+
+  // Check if we have pending peers from magnet link
+  std::vector<PeerInfo> pending_peers;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = pending_magnet_peers_.find(torrent_id);
+    if (it != pending_magnet_peers_.end()) {
+      pending_peers = std::move(it->second);
+      pending_magnet_peers_.erase(it);
+    }
+  }
+
+  // Add pending peers to discovered peers
+  if (!pending_peers.empty()) {
+    std::lock_guard<std::mutex> t_lock(torrent->mutex);
+    torrent->discovered_peers.insert(torrent->discovered_peers.end(),
+                                     pending_peers.begin(), pending_peers.end());
+  }
+
+  // Start worker threads
+  torrent->tracker_thread =
+      std::thread(&TorrentManager::tracker_worker, this, torrent_id);
+  torrent->peer_thread =
+      std::thread(&TorrentManager::peer_worker, this, torrent_id);
+
+  // Add to torrents map
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    torrents_[torrent_id] = std::move(torrent);
+  }
+
+  pixellib::core::logging::Logger::info("Added torrent: {}", torrent_id);
+  return torrent_id;
+}
+
 std::string TorrentManager::add_magnet_link(const std::string &magnet_uri) {
   // Parse magnet link
   if (magnet_uri.find("magnet:?") != 0) {
@@ -115,72 +221,60 @@ std::string TorrentManager::add_magnet_link(const std::string &magnet_uri) {
   // Start DHT peer discovery
   if (dht_client_ && dht_client_->is_running()) {
     dht_client_->find_peers(
-        info_hash, [torrent_id](const std::array<uint8_t, 20> & /*hash*/,
-                                const std::vector<dht::TorrentPeer> &peers) {
+        info_hash,
+        [this, torrent_id](const std::array<uint8_t, 20> & /*hash*/,
+                           const std::vector<dht::TorrentPeer> &peers) {
           pixellib::core::logging::Logger::info(
               "DHT discovered {} peers for torrent {}", peers.size(),
               torrent_id);
 
-          // TODO: Add peers to torrent (would need to implement peer addition)
-          // For now, just log
+          // Convert to PeerInfo
+          std::vector<PeerInfo> new_peers;
+          for (const auto &dht_peer : peers) {
+            PeerInfo pi;
+            pi.ip = dht_peer.ip;
+            pi.port = dht_peer.port;
+            new_peers.push_back(pi);
+          }
+
+          // First, determine whether the torrent exists while holding the
+          // manager mutex, and update pending lists if it does not.
+          Torrent *torrent = nullptr;
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+
+            // If torrent already exists (metadata fetched), grab a shared
+            // pointer so we can operate on it after releasing mutex_.
+            auto it = torrents_.find(torrent_id);
+            if (it != torrents_.end()) {
+              torrent = it->second.get();
+            } else {
+              // Store in pending list until metadata is fetched
+              auto &pending = pending_magnet_peers_[torrent_id];
+              size_t added_count = add_unique_peers(pending, new_peers);
+              if (added_count > 0) {
+                pixellib::core::logging::Logger::info(
+                    "DHT buffered {} new peers for pending magnet {}",
+                    added_count, torrent_id);
+              }
+            }
+          }
+
+          // If we resolved an active torrent, update its discovered peers
+          // under the torrent's own mutex, without holding mutex_.
+          if (torrent) {
+            std::lock_guard<std::mutex> t_lock(torrent->mutex);
+            size_t added_count = add_unique_peers(torrent->discovered_peers, new_peers);
+            if (added_count > 0) {
+              pixellib::core::logging::Logger::info(
+                  "DHT discovered {} new peers for active torrent {}",
+                  added_count, torrent_id);
+            }
+          }
         });
   }
 
-  // Return torrent ID (metadata will be fetched asynchronously)
   return torrent_id;
-}
-
-std::string
-TorrentManager::add_torrent_impl(TorrentMetadata metadata,
-                                 const std::vector<size_t> &file_priorities) {
-  std::string info_hash_hex =
-      StateManager::info_hash_to_hex(metadata.info_hash);
-
-  {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (torrents_.find(info_hash_hex) != torrents_.end()) {
-      throw std::runtime_error("Torrent already exists");
-    }
-  }
-
-  auto torrent = std::make_unique<Torrent>();
-  torrent->metadata = std::move(metadata);
-  torrent->peer_id = generate_peer_id();
-  torrent->tracker = std::make_unique<TrackerClient>(torrent->metadata);
-
-  // This part involves disk IO and can be slow
-  torrent->piece_manager = std::make_unique<PieceManager>(
-      torrent->metadata, download_dir_, file_priorities);
-
-  if (file_priorities.empty()) {
-    torrent->file_priorities.assign(torrent->metadata.files.size(), 1);
-  } else {
-    torrent->file_priorities = file_priorities;
-    torrent->file_priorities.resize(torrent->metadata.files.size(), 0);
-  }
-
-  auto saved_state = state_manager_.load_state(info_hash_hex);
-  if (saved_state) {
-    torrent->piece_manager->load_state(saved_state->bitfield);
-    torrent->uploaded_bytes = saved_state->uploaded_bytes;
-    torrent->downloaded_bytes = saved_state->downloaded_bytes;
-    if (!saved_state->file_priorities.empty()) {
-      torrent->file_priorities = saved_state->file_priorities;
-    }
-  }
-
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (torrents_.find(info_hash_hex) != torrents_.end()) {
-    throw std::runtime_error("Torrent already exists");
-  }
-
-  torrent->tracker_thread =
-      std::thread(&TorrentManager::tracker_worker, this, info_hash_hex);
-  torrent->peer_thread =
-      std::thread(&TorrentManager::peer_worker, this, info_hash_hex);
-
-  torrents_[info_hash_hex] = std::move(torrent);
-  return info_hash_hex;
 }
 
 bool TorrentManager::remove_torrent(const std::string &torrent_id) {
@@ -467,20 +561,8 @@ void TorrentManager::tracker_worker(const std::string &torrent_id) {
 
         // Re-lock to update shared data
         std::lock_guard<std::mutex> t_lock(torrent->mutex);
-        for (const auto &peer_info : peers) {
-          bool known = false;
-          for (const auto &existing : torrent->discovered_peers) {
-            if (existing.ip == peer_info.ip &&
-                existing.port == peer_info.port) {
-              known = true;
-              break;
-            }
-          }
-          if (!known) {
-            torrent->discovered_peers.push_back(peer_info);
-            total_new_peers++;
-          }
-        }
+        size_t added_count = add_unique_peers(torrent->discovered_peers, peers);
+        total_new_peers += added_count;
 
       } catch (const std::exception &e) {
         pixellib::core::logging::Logger::warning(
@@ -568,7 +650,8 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
         // Create new connection with encryption and extensions enabled
         auto peer_conn = std::make_shared<PeerConnection>(
             torrent->metadata, torrent->metadata.info_hash, torrent->peer_id,
-            peer_info, *torrent->piece_manager, true, true); // enable_encryption, enable_extensions
+            peer_info, *torrent->piece_manager, true,
+            true); // enable_encryption, enable_extensions
 
         // Set callbacks
         peer_conn->set_piece_callback([this, torrent_id](
