@@ -26,7 +26,9 @@ PeerConnection::PeerConnection(const TorrentMetadata &metadata,
       supports_extensions_(enable_extensions),
       encryption_enabled_(enable_encryption), peer_supports_extensions_(false),
       mse_crypto_(nullptr), mse_negotiated_(false),
-      extension_handshake_received_(false), metadata_exchange_(info_hash) {
+      extension_handshake_received_(false), metadata_exchange_(info_hash),
+      handshake_started_(false), handshake_complete_(false),
+      handshake_success_(false), handshake_send_pos_(0), handshake_recv_pos_(0) {
   if (encryption_enabled_) {
     mse_crypto_ = std::make_unique<MSECrypto>();
   }
@@ -43,7 +45,9 @@ PeerConnection::PeerConnection(const std::array<uint8_t, 20> &info_hash,
       supports_extensions_(enable_extensions),
       encryption_enabled_(enable_encryption), peer_supports_extensions_(false),
       mse_crypto_(nullptr), mse_negotiated_(false),
-      extension_handshake_received_(false), metadata_exchange_(info_hash) {
+      extension_handshake_received_(false), metadata_exchange_(info_hash),
+      handshake_started_(false), handshake_complete_(false),
+      handshake_success_(false), handshake_send_pos_(0), handshake_recv_pos_(0) {
   if (encryption_enabled_) {
     mse_crypto_ = std::make_unique<MSECrypto>();
   }
@@ -77,36 +81,43 @@ bool PeerConnection::connect() {
     return false;
   }
 
-  // Wait for connection with timeout
-  fd_set write_fds;
-  FD_ZERO(&write_fds);
-  FD_SET(socket_fd_, &write_fds);
+  // Connection initiated (either connected immediately or in progress)
+  return true;
+}
 
-  struct timeval timeout = {3, 0}; // 3 seconds
-  result = select(socket_fd_ + 1, nullptr, &write_fds, nullptr, &timeout);
+bool PeerConnection::is_connect_complete() {
+  if (connected_) return true;
+  if (socket_fd_ < 0) return false;
 
-  if (result <= 0) {
-    close(socket_fd_);
-    socket_fd_ = -1;
-    return false;
-  }
-
-  // Check if connection was successful
+  // Check if connection completed
   int error;
   socklen_t len = sizeof(error);
   getsockopt(socket_fd_, SOL_SOCKET, SO_ERROR, &error, &len);
-  if (error != 0) {
+  if (error == 0) {
+    connected_ = true;
+    return true;
+  } else if (error != EINPROGRESS) {
+    // Connection failed
     close(socket_fd_);
     socket_fd_ = -1;
     return false;
   }
 
-  // Set back to blocking
-  fcntl(socket_fd_, F_SETFL, flags);
+  // Still connecting
+  return false;
+}
 
-  connected_ = true;
+void PeerConnection::start_message_thread() {
+  if (!connected_ || thread_.joinable()) {
+    return;
+  }
+
+  // Set socket back to blocking mode for the message thread
+  int flags = fcntl(socket_fd_, F_GETFL, 0);
+  fcntl(socket_fd_, F_SETFL, flags & ~O_NONBLOCK);
+
+  // Start the message handling thread
   thread_ = std::thread(&PeerConnection::run, this);
-  return true;
 }
 
 void PeerConnection::disconnect() {
@@ -422,6 +433,157 @@ bool PeerConnection::perform_handshake() {
     send_extended_message(0, ext_handshake); // 0 = extended handshake
   }
 
+  return true;
+}
+
+bool PeerConnection::start_handshake() {
+  if (!connected_ || handshake_started_) {
+    return false;
+  }
+
+  // Create handshake message
+  handshake_send_buffer_.reserve(68);
+
+  // Protocol string length (1 byte)
+  handshake_send_buffer_.push_back(19);
+
+  // Protocol string
+  const char *protocol = "BitTorrent protocol";
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(), protocol, protocol + 19);
+
+  // Reserved bytes (8 bytes) - set extension bit if supported
+  std::array<uint8_t, 8> reserved = {0};
+  if (supports_extensions_) {
+    reserved[5] |= 0x10; // Extension protocol bit (BEP 0010)
+  }
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(), reserved.begin(), reserved.end());
+
+  // Info hash (20 bytes)
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(), info_hash_.begin(), info_hash_.end());
+
+  // Peer ID (20 bytes)
+  handshake_send_buffer_.insert(handshake_send_buffer_.end(), peer_id_.begin(), peer_id_.end());
+
+  handshake_recv_buffer_.resize(68);
+  handshake_send_pos_ = 0;
+  handshake_recv_pos_ = 0;
+  handshake_started_ = true;
+  handshake_complete_ = false;
+  handshake_success_ = false;
+
+  return true;
+}
+
+bool PeerConnection::continue_handshake() {
+  if (!handshake_started_ || handshake_complete_) {
+    return true;
+  }
+
+  // Send handshake data
+  while (handshake_send_pos_ < handshake_send_buffer_.size()) {
+    ssize_t sent = send(socket_fd_,
+                       handshake_send_buffer_.data() + handshake_send_pos_,
+                       handshake_send_buffer_.size() - handshake_send_pos_,
+                       0);
+    if (sent < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return false; // Would block, try again later
+      }
+      handshake_complete_ = true;
+      handshake_success_ = false;
+      return true;
+    }
+    handshake_send_pos_ += sent;
+  }
+
+  // Receive handshake response
+  while (handshake_recv_pos_ < handshake_recv_buffer_.size()) {
+    ssize_t received = recv(socket_fd_,
+                           handshake_recv_buffer_.data() + handshake_recv_pos_,
+                           handshake_recv_buffer_.size() - handshake_recv_pos_,
+                           0);
+    if (received < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        return false; // Would block, try again later
+      }
+      handshake_complete_ = true;
+      handshake_success_ = false;
+      return true;
+    } else if (received == 0) {
+      // Connection closed
+      handshake_complete_ = true;
+      handshake_success_ = false;
+      return true;
+    }
+    handshake_recv_pos_ += received;
+  }
+
+  // Verify response
+  if (handshake_recv_buffer_[0] != 19) {
+    handshake_complete_ = true;
+    handshake_success_ = false;
+    return true;
+  }
+  if (std::memcmp(handshake_recv_buffer_.data() + 1, "BitTorrent protocol", 19) != 0) {
+    handshake_complete_ = true;
+    handshake_success_ = false;
+    return true;
+  }
+  if (std::memcmp(handshake_recv_buffer_.data() + 28, info_hash_.data(), 20) != 0) {
+    handshake_complete_ = true;
+    handshake_success_ = false;
+    return true;
+  }
+
+  // Check if peer supports extensions (bit 20 in reserved bytes)
+  peer_supports_extensions_ = (handshake_recv_buffer_[25] & 0x10) != 0;
+
+  // Send unchoke to allow downloading from us
+  send_message(create_message(PeerMessageType::UNCHOKE));
+  am_choking_ = false;
+
+  // Send bitfield if we have any pieces
+  std::vector<uint8_t> bitfield_payload;
+  bool has_pieces = false;
+  int bit_count = 0;
+  uint8_t byte = 0;
+  for (bool has : bitfield_) {
+    if (has)
+      has_pieces = true;
+    if (has)
+      byte |= (1 << (7 - bit_count));
+    bit_count++;
+    if (bit_count == 8) {
+      bitfield_payload.push_back(byte);
+      byte = 0;
+      bit_count = 0;
+    }
+  }
+  if (bit_count > 0) {
+    bitfield_payload.push_back(byte);
+  }
+  if (has_pieces) {
+    send_message(create_message(PeerMessageType::BITFIELD, bitfield_payload));
+  }
+
+  // Send extended handshake if both support extensions
+  if (supports_extensions_ && peer_supports_extensions_) {
+    size_t meta_size = 0;
+    if (metadata_) {
+      // We have metadata
+      // In a real implementation we would calculate the size.
+      // For now, if we have metadata, we advertise a non-zero size if we were
+      // to support serving
+    }
+
+    auto ext_handshake = extension_protocol_.build_extended_handshake(
+        6881, // Default port
+        "PixelScrape/1.0.0", meta_size);
+    send_extended_message(0, ext_handshake); // 0 = extended handshake
+  }
+
+  handshake_complete_ = true;
+  handshake_success_ = true;
   return true;
 }
 

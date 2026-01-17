@@ -7,6 +7,7 @@
 #include "torrent_metadata.hpp"
 #include "tracker_client.hpp"
 #include <atomic>
+#include <chrono>
 #include <json.hpp>
 #include <logging.hpp>
 #include <memory>
@@ -83,10 +84,19 @@ private:
   mutable std::mutex mutex_;
 
   // Connection management
+  enum class ConnectionState {
+    CONNECTING,
+    HANDSHAKING,
+    COMPLETED,
+    FAILED
+  };
+
   struct ConnectionRequest {
     std::string torrent_id;
     PeerInfo peer_info;
     std::shared_ptr<PeerConnection> peer_connection;
+    ConnectionState state;
+    std::chrono::steady_clock::time_point start_time;
   };
   std::queue<ConnectionRequest> connection_queue_;
   std::mutex connection_mutex_;

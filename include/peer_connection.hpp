@@ -70,6 +70,8 @@ public:
 
   // Connection management
   bool connect();
+  bool is_connect_complete();
+  void start_message_thread();
   void disconnect();
   bool is_connected() const { return connected_; }
   const PeerInfo &get_peer_info() const { return peer_info_; }
@@ -101,6 +103,12 @@ public:
 
   // Handshake
   bool perform_handshake();
+
+  // Non-blocking handshake operations
+  bool start_handshake();
+  bool continue_handshake();
+  bool is_handshake_complete() const { return handshake_complete_; }
+  bool handshake_successful() const { return handshake_success_; }
 
   // Extension protocol (BEP 0010)
   void send_extended_message(uint8_t ext_msg_id,
@@ -160,6 +168,15 @@ private:
   ExtensionProtocol extension_protocol_;
   bool extension_handshake_received_;
   MetadataExchange metadata_exchange_;
+
+  // Handshake state for non-blocking operations
+  bool handshake_started_;
+  bool handshake_complete_;
+  bool handshake_success_;
+  std::vector<uint8_t> handshake_send_buffer_;
+  std::vector<uint8_t> handshake_recv_buffer_;
+  size_t handshake_send_pos_;
+  size_t handshake_recv_pos_;
 
   mutable std::mutex mutex_;
 };

@@ -619,36 +619,109 @@ void TorrentManager::tracker_worker(const std::string &torrent_id) {
 }
 
 void TorrentManager::connection_worker() {
-  while (connection_worker_running_) {
-    ConnectionRequest request;
+  std::vector<ConnectionRequest> active_requests;
 
+  while (connection_worker_running_) {
+    // Add new connection requests
     {
+      std::lock_guard<std::mutex> lock(connection_mutex_);
+      while (!connection_queue_.empty()) {
+        auto request = std::move(connection_queue_.front());
+        connection_queue_.pop();
+
+        // Initialize the connection state
+        request.state = TorrentManager::ConnectionState::CONNECTING;
+        request.start_time = std::chrono::steady_clock::now();
+
+        // Start the connection
+        if (request.peer_connection->connect()) {
+          active_requests.push_back(std::move(request));
+        } else {
+          // Connection failed immediately
+          pixellib::core::logging::Logger::debug(
+              "Connection failed immediately to peer {}.{}.{}.{}:{} for torrent {}",
+              static_cast<int>(request.peer_info.ip[0]),
+              static_cast<int>(request.peer_info.ip[1]),
+              static_cast<int>(request.peer_info.ip[2]),
+              static_cast<int>(request.peer_info.ip[3]),
+              request.peer_info.port, request.torrent_id.substr(0, 8));
+        }
+      }
+    }
+
+    if (active_requests.empty()) {
+      // Wait for new requests
       std::unique_lock<std::mutex> lock(connection_mutex_);
-      connection_cv_.wait(lock, [this]() {
+      connection_cv_.wait_for(lock, std::chrono::milliseconds(100), [this]() {
         return !connection_queue_.empty() || !connection_worker_running_;
       });
+      continue;
+    }
 
-      if (!connection_worker_running_) {
-        break;
-      }
+    // Check for completed connections and timeouts
+    auto now = std::chrono::steady_clock::now();
+    std::vector<size_t> completed_indices;
 
-      if (connection_queue_.empty()) {
+    for (size_t i = 0; i < active_requests.size(); ++i) {
+      auto &request = active_requests[i];
+
+      // Check for timeout (10 seconds)
+      auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+          now - request.start_time);
+      if (elapsed.count() >= 10) {
+        pixellib::core::logging::Logger::debug(
+            "Connection timeout to peer {}.{}.{}.{}:{} for torrent {}",
+            static_cast<int>(request.peer_info.ip[0]),
+            static_cast<int>(request.peer_info.ip[1]),
+            static_cast<int>(request.peer_info.ip[2]),
+            static_cast<int>(request.peer_info.ip[3]),
+            request.peer_info.port, request.torrent_id.substr(0, 8));
+        request.state = TorrentManager::ConnectionState::FAILED;
+        completed_indices.push_back(i);
         continue;
       }
 
-      request = std::move(connection_queue_.front());
-      connection_queue_.pop();
+      if (request.state == TorrentManager::ConnectionState::CONNECTING) {
+        if (request.peer_connection->is_connect_complete()) {
+          // Connection established, start handshake
+          if (request.peer_connection->start_handshake()) {
+            request.state = TorrentManager::ConnectionState::HANDSHAKING;
+          } else {
+            request.state = TorrentManager::ConnectionState::FAILED;
+            completed_indices.push_back(i);
+          }
+        }
+      } else if (request.state == TorrentManager::ConnectionState::HANDSHAKING) {
+        if (request.peer_connection->continue_handshake()) {
+          if (request.peer_connection->is_handshake_complete()) {
+            if (request.peer_connection->handshake_successful()) {
+              request.state = TorrentManager::ConnectionState::COMPLETED;
+            } else {
+              request.state = TorrentManager::ConnectionState::FAILED;
+            }
+            completed_indices.push_back(i);
+          }
+        }
+      }
     }
 
-    // Process the connection request
-    if (request.peer_connection->connect()) {
-      if (request.peer_connection->perform_handshake()) {
+    // Process completed requests
+    for (auto it = completed_indices.rbegin(); it != completed_indices.rend(); ++it) {
+      size_t index = *it;
+      auto request = std::move(active_requests[index]);
+
+      if (request.state == TorrentManager::ConnectionState::COMPLETED) {
         // Connection successful, add to torrent's peer list
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = torrents_.find(request.torrent_id);
         if (it != torrents_.end()) {
           std::lock_guard<std::mutex> t_lock(it->second->mutex);
           it->second->peers.push_back(request.peer_connection);
+
+          // Start the peer's message handling thread now that handshake is complete
+          // Set socket back to blocking for the message thread
+          // Note: We need to modify PeerConnection to handle this properly
+          request.peer_connection->start_message_thread();
 
           pixellib::core::logging::Logger::info(
               "Successfully connected to peer {}.{}.{}.{}:{} for torrent {}",
@@ -660,23 +733,25 @@ void TorrentManager::connection_worker() {
         }
       } else {
         pixellib::core::logging::Logger::debug(
-            "Handshake failed with peer {}.{}.{}.{}:{} for torrent {}",
+            "Connection/handshake failed to peer {}.{}.{}.{}:{} for torrent {}",
             static_cast<int>(request.peer_info.ip[0]),
             static_cast<int>(request.peer_info.ip[1]),
             static_cast<int>(request.peer_info.ip[2]),
             static_cast<int>(request.peer_info.ip[3]),
             request.peer_info.port, request.torrent_id.substr(0, 8));
       }
-    } else {
-      pixellib::core::logging::Logger::debug(
-          "Connection failed to peer {}.{}.{}.{}:{} for torrent {}",
-          static_cast<int>(request.peer_info.ip[0]),
-          static_cast<int>(request.peer_info.ip[1]),
-          static_cast<int>(request.peer_info.ip[2]),
-          static_cast<int>(request.peer_info.ip[3]),
-          request.peer_info.port, request.torrent_id.substr(0, 8));
+
+      active_requests.erase(active_requests.begin() + index);
+    }
+
+    // Small delay to prevent busy loop
+    if (!active_requests.empty()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
   }
+
+  // Clean up any remaining active requests
+  active_requests.clear();
 }
 
 void TorrentManager::peer_worker(const std::string &torrent_id) {
