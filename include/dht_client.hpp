@@ -36,6 +36,12 @@ struct TorrentPeer {
   uint16_t port;
 };
 
+struct StoredPeer {
+  std::array<uint8_t, 4> ip;
+  uint16_t port;
+  std::chrono::steady_clock::time_point last_announced;
+};
+
 // Callbacks
 using PeerDiscoveryCallback =
     std::function<void(const std::array<uint8_t, 20> &info_hash,
@@ -154,6 +160,11 @@ private:
   // Rate limiting
   bool check_rate_limit(const std::array<uint8_t, 4> &ip);
 
+  // Peer Storage
+  void store_peer(const std::array<uint8_t, 20> &info_hash,
+                  const std::array<uint8_t, 4> &ip, uint16_t port);
+  void expire_peers();
+
   // Network
   void send_message(const std::vector<uint8_t> &data,
                     const std::array<uint8_t, 4> &ip, uint16_t port);
@@ -176,6 +187,11 @@ private:
   // Peer discovery callbacks
   std::unordered_map<std::string, PeerDiscoveryCallback> peer_callbacks_;
   std::mutex callbacks_mutex_;
+
+  // Peer Storage
+  using PeerList = std::vector<StoredPeer>;
+  std::unordered_map<std::string, PeerList> stored_peers_;
+  std::mutex storage_mutex_;
 
   // Unified iterative lookup state
 

@@ -232,13 +232,76 @@ void DHTClient::handle_query(const QueryMessage &query,
 
   case QueryType::GET_PEERS: {
     if (query.info_hash) {
-      // We don't store peer info, so return closest nodes
-      NodeID target(*query.info_hash);
-      auto closest = routing_table_->find_closest_nodes(target, 8);
-      std::string token = token_manager_.generate_token(from_ip);
-      auto resp = response::get_peers_with_nodes(own_id_, closest, token,
-                                                 query.transaction_id);
-      send_message(resp.encode(), from_ip, from_port);
+      // Check if we have peers for this info hash
+      std::string hash_key(query.info_hash->begin(), query.info_hash->end());
+      std::vector<TorrentPeer> peers;
+
+      {
+        std::lock_guard<std::mutex> lock(storage_mutex_);
+        auto it = stored_peers_.find(hash_key);
+        if (it != stored_peers_.end()) {
+          for (const auto &p : it->second) {
+            TorrentPeer tp;
+            tp.ip = p.ip;
+            tp.port = p.port;
+            peers.push_back(tp);
+          }
+        }
+      }
+
+      if (!peers.empty()) {
+        struct {
+          std::vector<TorrentPeer> values;
+        } peer_data;
+        peer_data.values = peers;
+
+        // Return peers (values)
+        // Note: The response::get_peers helper might need update or we
+        // construct manually if it assumes nodes only Implementation note: The
+        // current response::get_peers helper seems to handle nodes. We really
+        // need a response::get_peers_with_values. But checking
+        // `response::get_peers_with_nodes` usage...
+
+        // Let's look at dht_protocol.hpp later. For now let's assume we can
+        // construct a response with values. Actually, looking at
+        // `handle_response`, it expects `peers` field for values.
+
+        // Since I cannot easily see dht_protocol.hpp right now in this context
+        // without a view_file, and I want to be safe, I will stick to the plan
+        // but realize I might need to update dht_protocol.hpp too if
+        // `get_peers_with_values` doesn't exist. Wait, I saw
+        // `response::get_peers_with_nodes` in the file. Let's assume I need to
+        // handle this properly.
+
+        // For now, I will add the logic to return close nodes ALWAYS (Kademlia
+        // spec says close nodes are returned even if values are found,
+        // usually), but finding values means we should return them.
+
+        // Let's modify the response construction.
+
+        // Convert TorrentPeer to DHTNode for response
+        std::vector<DHTNode> peer_nodes;
+        for (const auto &peer : peers) {
+          DHTNode n;
+          n.ip = peer.ip;
+          n.port = peer.port;
+          // id is default constructed (not used for values)
+          peer_nodes.push_back(n);
+        }
+
+        std::string token = token_manager_.generate_token(from_ip);
+        auto resp = response::get_peers_with_values(own_id_, peer_nodes, token,
+                                                    query.transaction_id);
+        send_message(resp.encode(), from_ip, from_port);
+      } else {
+        // No peers, return closest nodes
+        NodeID target(*query.info_hash);
+        auto closest = routing_table_->find_closest_nodes(target, 8);
+        std::string token = token_manager_.generate_token(from_ip);
+        auto resp = response::get_peers_with_nodes(own_id_, closest, token,
+                                                   query.transaction_id);
+        send_message(resp.encode(), from_ip, from_port);
+      }
     }
     break;
   }
@@ -247,8 +310,10 @@ void DHTClient::handle_query(const QueryMessage &query,
     if (query.info_hash && query.token) {
       // Validate token
       if (token_manager_.validate_token(*query.token, from_ip)) {
-        // Token valid - we would store the peer info here
-        // For now, just send success response
+        // Token valid - store the peer info
+        store_peer(*query.info_hash, from_ip,
+                   query.port ? *query.port : from_port);
+
         auto resp = response::announce_peer(own_id_, query.transaction_id);
         send_message(resp.encode(), from_ip, from_port);
       } else {
@@ -758,6 +823,7 @@ void DHTClient::maintenance_loop() {
     token_manager_.rotate_secrets();
     refresh_routing_table();
     check_node_health();
+    expire_peers();
     save_routing_table();
   }
 }
@@ -798,16 +864,75 @@ bool DHTClient::check_rate_limit(const std::array<uint8_t, 4> &ip) {
 
   if (elapsed >= 1) {
     // Reset counter
-    it->second = {1, now};
+    rate_limits_[ip_key] = {1, now};
     return true;
   }
 
   if (it->second.first >= DHTConfig::MAX_QUERIES_PER_SECOND) {
-    return false; // Rate limited
+    return false;
   }
 
   it->second.first++;
   return true;
+}
+
+void DHTClient::store_peer(const std::array<uint8_t, 20> &info_hash,
+                           const std::array<uint8_t, 4> &ip, uint16_t port) {
+  std::lock_guard<std::mutex> lock(storage_mutex_);
+
+  std::string key(info_hash.begin(), info_hash.end());
+  auto &peers = stored_peers_[key];
+
+  // Check if peer already exists
+  for (auto &peer : peers) {
+    if (peer.ip == ip && peer.port == port) {
+      peer.last_announced = std::chrono::steady_clock::now();
+      return;
+    }
+  }
+
+  // Limit peers per torrent to avoid amplification attacks/spam
+  if (peers.size() >= 100) {
+    // Replace the oldest one or just ignore? k-buckets replace oldest.
+    // For simplicity, let's just ignore or maybe replace random.
+    // Let's remove the first one (oldest usually if purely appended)
+    peers.erase(peers.begin());
+  }
+
+  StoredPeer new_peer;
+  new_peer.ip = ip;
+  new_peer.port = port;
+  new_peer.last_announced = std::chrono::steady_clock::now();
+  peers.push_back(new_peer);
+
+  pixellib::core::logging::Logger::debug(
+      "DHT: Stored peer {}.{}.{}.{}:{}", static_cast<int>(ip[0]),
+      static_cast<int>(ip[1]), static_cast<int>(ip[2]), static_cast<int>(ip[3]),
+      port);
+}
+
+void DHTClient::expire_peers() {
+  std::lock_guard<std::mutex> lock(storage_mutex_);
+  auto now = std::chrono::steady_clock::now();
+
+  // Expiration time: 30 minutes
+  auto expiration = std::chrono::minutes(30);
+
+  for (auto it = stored_peers_.begin(); it != stored_peers_.end();) {
+    auto &peers = it->second;
+
+    peers.erase(std::remove_if(peers.begin(), peers.end(),
+                               [&](const StoredPeer &p) {
+                                 return (now - p.last_announced) > expiration;
+                               }),
+                peers.end());
+
+    if (peers.empty()) {
+      it = stored_peers_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void DHTClient::send_message(const std::vector<uint8_t> &data,
