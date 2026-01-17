@@ -21,7 +21,14 @@ include_directories(
 # Source files
 set(SOURCES
     src/main.cpp
-    src/torrent_manager.cpp
+    src/manager/lifecycle.cpp
+    src/manager/operations.cpp
+    src/manager/status.cpp
+    src/manager/tracker_worker.cpp
+    src/manager/peer_worker.cpp
+    src/manager/connection_worker.cpp
+    src/manager/tcp_listener.cpp
+    src/manager/utils.cpp
     src/bencode/parser.cpp
     src/crypto/sha1.cpp
     src/crypto/mse_crypto.cpp
