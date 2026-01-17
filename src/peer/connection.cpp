@@ -17,16 +17,33 @@ PeerConnection::PeerConnection(const TorrentMetadata &metadata,
                                const std::array<uint8_t, 20> &peer_id,
                                const PeerInfo &peer_info,
                                PieceManager &piece_manager,
-                               bool enable_encryption,
-                               bool enable_extensions)
-    : metadata_(metadata), info_hash_(info_hash), peer_id_(peer_id),
-      peer_info_(peer_info), piece_manager_(piece_manager), socket_fd_(-1),
+                               bool enable_encryption, bool enable_extensions)
+    : metadata_(&metadata), info_hash_(info_hash), peer_id_(peer_id),
+      peer_info_(peer_info), piece_manager_(&piece_manager), socket_fd_(-1),
       connected_(false), am_choking_(true), am_interested_(false),
       peer_choking_(true), peer_interested_(false),
-      bitfield_(piece_manager_.get_bitfield()), dht_port_(std::nullopt),
-      supports_extensions_(enable_extensions), encryption_enabled_(enable_encryption),
-      peer_supports_extensions_(false), mse_crypto_(nullptr), mse_negotiated_(false),
-      extension_handshake_received_(false) {
+      bitfield_(piece_manager.get_bitfield()), dht_port_(std::nullopt),
+      supports_extensions_(enable_extensions),
+      encryption_enabled_(enable_encryption), peer_supports_extensions_(false),
+      mse_crypto_(nullptr), mse_negotiated_(false),
+      extension_handshake_received_(false), metadata_exchange_(info_hash) {
+  if (encryption_enabled_) {
+    mse_crypto_ = std::make_unique<MSECrypto>();
+  }
+}
+
+PeerConnection::PeerConnection(const std::array<uint8_t, 20> &info_hash,
+                               const std::array<uint8_t, 20> &peer_id,
+                               const PeerInfo &peer_info,
+                               bool enable_encryption, bool enable_extensions)
+    : metadata_(nullptr), info_hash_(info_hash), peer_id_(peer_id),
+      peer_info_(peer_info), piece_manager_(nullptr), socket_fd_(-1),
+      connected_(false), am_choking_(true), am_interested_(false),
+      peer_choking_(true), peer_interested_(false), dht_port_(std::nullopt),
+      supports_extensions_(enable_extensions),
+      encryption_enabled_(enable_encryption), peer_supports_extensions_(false),
+      mse_crypto_(nullptr), mse_negotiated_(false),
+      extension_handshake_received_(false), metadata_exchange_(info_hash) {
   if (encryption_enabled_) {
     mse_crypto_ = std::make_unique<MSECrypto>();
   }
@@ -210,8 +227,11 @@ void PeerConnection::handle_message(const PeerMessage &message) {
     break;
   }
   case PeerMessageType::BITFIELD: {
+    if (!metadata_)
+      break; // Cannot handle bitfield without metadata (to know size)
+
     size_t num_bytes = message.payload.size();
-    bitfield_.resize(metadata_.piece_hashes.size(), false);
+    bitfield_.resize(metadata_->piece_hashes.size(), false);
     for (size_t i = 0; i < num_bytes && i * 8 < bitfield_.size(); ++i) {
       uint8_t byte = message.payload[i];
       for (size_t j = 0; j < 8 && i * 8 + j < bitfield_.size(); ++j) {
@@ -231,9 +251,10 @@ void PeerConnection::handle_message(const PeerMessage &message) {
           *reinterpret_cast<const uint32_t *>(message.payload.data() + 8));
 
       // Check if we have the piece and are not choking
-      if (!am_choking_ && index < bitfield_.size() && bitfield_[index]) {
+      if (piece_manager_ && !am_choking_ && index < bitfield_.size() &&
+          bitfield_[index]) {
         // Read the piece data from piece manager
-        auto piece_data = piece_manager_.read_piece(index);
+        auto piece_data = piece_manager_->read_piece(index);
         if (!piece_data.empty() && begin + length <= piece_data.size()) {
           std::vector<uint8_t> block_data(piece_data.begin() + begin,
                                           piece_data.begin() + begin + length);
@@ -387,11 +408,17 @@ bool PeerConnection::perform_handshake() {
 
   // Send extended handshake if both support extensions
   if (supports_extensions_ && peer_supports_extensions_) {
+    size_t meta_size = 0;
+    if (metadata_) {
+      // We have metadata
+      // In a real implementation we would calculate the size.
+      // For now, if we have metadata, we advertise a non-zero size if we were
+      // to support serving
+    }
+
     auto ext_handshake = extension_protocol_.build_extended_handshake(
         6881, // Default port
-        "PixelScrape/1.0.0",
-        0 // metadata_size, if we have it
-    );
+        "PixelScrape/1.0.0", meta_size);
     send_extended_message(0, ext_handshake); // 0 = extended handshake
   }
 
@@ -440,7 +467,8 @@ void PeerConnection::send_extended_message(
   send_message(create_message(PeerMessageType::EXTENDED, full_payload));
 }
 
-void PeerConnection::handle_extended_message(const std::vector<uint8_t> &payload) {
+void PeerConnection::handle_extended_message(
+    const std::vector<uint8_t> &payload) {
   if (payload.empty()) {
     return;
   }
@@ -452,32 +480,28 @@ void PeerConnection::handle_extended_message(const std::vector<uint8_t> &payload
   if (ext_msg_id == 0) {
     if (extension_protocol_.parse_extended_handshake(ext_payload)) {
       extension_handshake_received_ = true;
-      
-      // Log peer capabilities
-      // Can now use ut_metadata, ut_pex, etc. based on what peer supports
+
+      // Pass handshake to metadata exchange
+      metadata_exchange_.handle_extension_handshake(ext_payload);
+
+      // If we need metadata, start requesting it
+      if (!metadata_ && !metadata_exchange_.is_complete()) {
+        metadata_exchange_.request_metadata(*this);
+      }
     }
     return;
   }
 
   // Handle ut_metadata messages
   if (extension_protocol_.supports_ut_metadata()) {
-    uint8_t ut_metadata_id = extension_protocol_.get_peer_extension_id("ut_metadata");
+    uint8_t ut_metadata_id =
+        extension_protocol_.get_peer_extension_id("ut_metadata");
     if (ext_msg_id == ut_metadata_id) {
-      ExtensionProtocol::MetadataMessage metadata_msg;
-      if (extension_protocol_.parse_metadata_message(ext_payload, metadata_msg)) {
-        // Handle metadata request/data/reject
-        // This would be used for magnet link support
-        switch (metadata_msg.msg_type) {
-          case 0: // request
-            // TODO: Send metadata piece if we have it
-            break;
-          case 1: // data
-            // TODO: Store received metadata piece
-            break;
-          case 2: // reject
-            // TODO: Handle rejection
-            break;
-        }
+      metadata_exchange_.handle_metadata_message(ext_payload, *this);
+
+      // If we don't have metadata yet, try to request more if possible
+      if (!metadata_ && !metadata_exchange_.is_complete()) {
+        metadata_exchange_.request_metadata(*this);
       }
       return;
     }
@@ -500,7 +524,7 @@ void PeerConnection::handle_extended_message(const std::vector<uint8_t> &payload
 bool PeerConnection::perform_mse_handshake() {
   // MSE/PE handshake implementation
   // This is a complex protocol - simplified version here
-  
+
   if (!mse_crypto_ || !encryption_enabled_) {
     return false;
   }
@@ -511,7 +535,7 @@ bool PeerConnection::perform_mse_handshake() {
     auto public_key = mse_crypto_->get_public_key();
 
     // Send our public key
-    if (send(socket_fd_, public_key.data(), public_key.size(), 0) != 
+    if (send(socket_fd_, public_key.data(), public_key.size(), 0) !=
         static_cast<ssize_t>(public_key.size())) {
       return false;
     }
@@ -533,7 +557,7 @@ bool PeerConnection::perform_mse_handshake() {
 
     // For now, we'll use plaintext mode (crypto_select = 0x01)
     // Full implementation would negotiate RC4 encryption
-    
+
     mse_negotiated_ = true;
     return true;
 
@@ -542,24 +566,24 @@ bool PeerConnection::perform_mse_handshake() {
   }
 }
 
-bool PeerConnection::send_encrypted(const std::vector<uint8_t>& data) {
+bool PeerConnection::send_encrypted(const std::vector<uint8_t> &data) {
   if (!mse_crypto_ || !mse_negotiated_) {
     // Send plaintext
-    return send(socket_fd_, data.data(), data.size(), 0) == 
+    return send(socket_fd_, data.data(), data.size(), 0) ==
            static_cast<ssize_t>(data.size());
   }
 
   // Encrypt and send
   std::vector<uint8_t> encrypted_data = data;
   mse_crypto_->encrypt(encrypted_data);
-  return send(socket_fd_, encrypted_data.data(), encrypted_data.size(), 0) == 
+  return send(socket_fd_, encrypted_data.data(), encrypted_data.size(), 0) ==
          static_cast<ssize_t>(encrypted_data.size());
 }
 
-bool PeerConnection::recv_encrypted(std::vector<uint8_t>& data, size_t length) {
+bool PeerConnection::recv_encrypted(std::vector<uint8_t> &data, size_t length) {
   data.resize(length);
-  
-  if (recv(socket_fd_, data.data(), length, MSG_WAITALL) != 
+
+  if (recv(socket_fd_, data.data(), length, MSG_WAITALL) !=
       static_cast<ssize_t>(length)) {
     return false;
   }

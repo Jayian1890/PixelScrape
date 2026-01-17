@@ -1,6 +1,5 @@
 #pragma once
 
-#include "peer_connection.hpp"
 #include <array>
 #include <functional>
 #include <mutex>
@@ -8,6 +7,8 @@
 #include <vector>
 
 namespace pixelscrape {
+
+class PeerConnection;
 
 // Extension message IDs (negotiated during handshake)
 enum class ExtensionMessageID : uint8_t {

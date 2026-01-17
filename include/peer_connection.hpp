@@ -1,9 +1,9 @@
 #pragma once
 
+#include "extension_protocol.hpp"
+#include "mse_crypto.hpp"
 #include "torrent_metadata.hpp"
 #include "tracker_client.hpp"
-#include "mse_crypto.hpp"
-#include "extension_protocol.hpp"
 #include <array>
 #include <atomic>
 #include <functional>
@@ -11,6 +11,9 @@
 #include <optional>
 #include <thread>
 #include <vector>
+
+#include "metadata_exchange.hpp"
+#include "piece_manager.hpp"
 
 namespace pixelscrape {
 
@@ -50,12 +53,19 @@ struct PieceBlock {
 
 class PeerConnection {
 public:
+  // Constructor for normal leeching/seeding
   PeerConnection(const TorrentMetadata &metadata,
                  const std::array<uint8_t, 20> &info_hash,
                  const std::array<uint8_t, 20> &peer_id,
                  const PeerInfo &peer_info, PieceManager &piece_manager,
-                 bool enable_encryption = true,
+                 bool enable_encryption = true, bool enable_extensions = true);
+
+  // Constructor for metadata fetching (magnet links)
+  PeerConnection(const std::array<uint8_t, 20> &info_hash,
+                 const std::array<uint8_t, 20> &peer_id,
+                 const PeerInfo &peer_info, bool enable_encryption = true,
                  bool enable_extensions = true);
+
   ~PeerConnection();
 
   // Connection management
@@ -97,9 +107,13 @@ public:
                              const std::vector<uint8_t> &payload);
   void enable_extension_protocol() { supports_extensions_ = true; }
   bool supports_extensions() const { return supports_extensions_; }
-  ExtensionProtocol& get_extension_protocol() { return extension_protocol_; }
-  const ExtensionProtocol& get_extension_protocol() const { return extension_protocol_; }
-  
+  ExtensionProtocol &get_extension_protocol() { return extension_protocol_; }
+  const ExtensionProtocol &get_extension_protocol() const {
+    return extension_protocol_;
+  }
+
+  MetadataExchange &get_metadata_exchange() { return metadata_exchange_; }
+
   // Encryption (BEP 0008)
   bool is_encrypted() const { return encryption_enabled_; }
   void enable_encryption() { encryption_enabled_ = true; }
@@ -109,19 +123,19 @@ private:
   void handle_message(const PeerMessage &message);
   void handle_extended_message(const std::vector<uint8_t> &payload);
   bool perform_mse_handshake();
-  bool send_encrypted(const std::vector<uint8_t>& data);
-  bool recv_encrypted(std::vector<uint8_t>& data, size_t length);
+  bool send_encrypted(const std::vector<uint8_t> &data);
+  bool recv_encrypted(std::vector<uint8_t> &data, size_t length);
 
   PieceCallback piece_callback_;
   PeerMessage create_message(PeerMessageType type,
                              const std::vector<uint8_t> &payload = {});
   std::vector<uint8_t> serialize_message(const PeerMessage &message);
 
-  const TorrentMetadata &metadata_;
+  const TorrentMetadata *metadata_;
   std::array<uint8_t, 20> info_hash_;
   std::array<uint8_t, 20> peer_id_;
   PeerInfo peer_info_;
-  PieceManager &piece_manager_;
+  PieceManager *piece_manager_;
 
   int socket_fd_;
   std::atomic<bool> connected_;
@@ -141,10 +155,11 @@ private:
   // Encryption
   std::unique_ptr<MSECrypto> mse_crypto_;
   bool mse_negotiated_;
-  
+
   // Extension protocol
   ExtensionProtocol extension_protocol_;
   bool extension_handshake_received_;
+  MetadataExchange metadata_exchange_;
 
   mutable std::mutex mutex_;
 };
