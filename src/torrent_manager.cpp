@@ -51,9 +51,22 @@ TorrentManager::TorrentManager(const std::string &download_dir,
   // Initialize DHT client
   dht_client_ = std::make_unique<dht::DHTClient>(6881);
   dht_client_->start(state_dir);
+
+  // Start connection worker thread
+  connection_thread_ = std::thread(&TorrentManager::connection_worker, this);
 }
 
 TorrentManager::~TorrentManager() {
+  // Stop connection worker
+  {
+    std::lock_guard<std::mutex> lock(connection_mutex_);
+    connection_worker_running_ = false;
+    connection_cv_.notify_one();
+  }
+  if (connection_thread_.joinable()) {
+    connection_thread_.join();
+  }
+
   if (dht_client_) {
     dht_client_->stop();
   }
@@ -592,6 +605,67 @@ void TorrentManager::tracker_worker(const std::string &torrent_id) {
   }
 }
 
+void TorrentManager::connection_worker() {
+  while (connection_worker_running_) {
+    ConnectionRequest request;
+
+    {
+      std::unique_lock<std::mutex> lock(connection_mutex_);
+      connection_cv_.wait(lock, [this]() {
+        return !connection_queue_.empty() || !connection_worker_running_;
+      });
+
+      if (!connection_worker_running_) {
+        break;
+      }
+
+      if (connection_queue_.empty()) {
+        continue;
+      }
+
+      request = std::move(connection_queue_.front());
+      connection_queue_.pop();
+    }
+
+    // Process the connection request
+    if (request.peer_connection->connect()) {
+      if (request.peer_connection->perform_handshake()) {
+        // Connection successful, add to torrent's peer list
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = torrents_.find(request.torrent_id);
+        if (it != torrents_.end()) {
+          std::lock_guard<std::mutex> t_lock(it->second->mutex);
+          it->second->peers.push_back(request.peer_connection);
+
+          pixellib::core::logging::Logger::info(
+              "Successfully connected to peer {}.{}.{}.{}:{} for torrent {}",
+              static_cast<int>(request.peer_info.ip[0]),
+              static_cast<int>(request.peer_info.ip[1]),
+              static_cast<int>(request.peer_info.ip[2]),
+              static_cast<int>(request.peer_info.ip[3]),
+              request.peer_info.port, request.torrent_id.substr(0, 8));
+        }
+      } else {
+        pixellib::core::logging::Logger::debug(
+            "Handshake failed with peer {}.{}.{}.{}:{} for torrent {}",
+            static_cast<int>(request.peer_info.ip[0]),
+            static_cast<int>(request.peer_info.ip[1]),
+            static_cast<int>(request.peer_info.ip[2]),
+            static_cast<int>(request.peer_info.ip[3]),
+            request.peer_info.port, request.torrent_id.substr(0, 8));
+      }
+    } else {
+      pixellib::core::logging::Logger::debug(
+          "Connection failed to peer {}.{}.{}.{}:{} for torrent {}",
+          static_cast<int>(request.peer_info.ip[0]),
+          static_cast<int>(request.peer_info.ip[1]),
+          static_cast<int>(request.peer_info.ip[2]),
+          static_cast<int>(request.peer_info.ip[3]),
+          request.peer_info.port, request.torrent_id.substr(0, 8));
+    }
+  }
+}
+
 void TorrentManager::peer_worker(const std::string &torrent_id) {
   while (true) {
     std::shared_ptr<Torrent> torrent_shared; // Hold shared ownership if needed,
@@ -641,10 +715,9 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
         }
       }
 
-      // Connect to new peers outside the lock
-      std::vector<std::shared_ptr<PeerConnection>> new_connections;
+      // Submit connection requests to the connection worker
       for (const auto &peer_info : discovered_copy) {
-        if (peers_copy.size() + new_connections.size() >= 50)
+        if (peers_copy.size() >= 50)
           break;
 
         // Create new connection with encryption and extensions enabled
@@ -682,23 +755,19 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
           }
         });
 
-        if (peer_conn->connect()) {
-          if (peer_conn->perform_handshake()) {
-            new_connections.push_back(peer_conn);
-          }
+        // Submit connection request to the connection worker
+        {
+          std::lock_guard<std::mutex> lock(connection_mutex_);
+          connection_queue_.push({torrent_id, peer_info, peer_conn});
+          connection_cv_.notify_one();
         }
       }
 
-      // Update shared peer list
-      if (!new_connections.empty()) {
+      // Cleanup disconnected peers
+      {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = torrents_.find(torrent_id);
         if (it != torrents_.end()) {
-          it->second->peers.insert(it->second->peers.end(),
-                                   new_connections.begin(),
-                                   new_connections.end());
-
-          // Cleanup disconnected peers
           it->second->peers.erase(
               std::remove_if(it->second->peers.begin(), it->second->peers.end(),
                              [](const std::shared_ptr<PeerConnection> &p) {

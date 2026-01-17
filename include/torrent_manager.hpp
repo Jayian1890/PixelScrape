@@ -68,6 +68,8 @@ public:
 private:
   void tracker_worker(const std::string &torrent_id);
   void peer_worker(const std::string &torrent_id);
+  void connection_worker();
+  void verification_worker();
   std::string add_torrent_impl(TorrentMetadata metadata,
                                const std::vector<size_t> &file_priorities);
   std::array<uint8_t, 20> generate_peer_id();
@@ -79,6 +81,29 @@ private:
   std::unique_ptr<dht::DHTClient> dht_client_;
   std::atomic<bool> running_{true};
   mutable std::mutex mutex_;
+
+  // Connection management
+  struct ConnectionRequest {
+    std::string torrent_id;
+    PeerInfo peer_info;
+    std::shared_ptr<PeerConnection> peer_connection;
+  };
+  std::queue<ConnectionRequest> connection_queue_;
+  std::mutex connection_mutex_;
+  std::condition_variable connection_cv_;
+  std::thread connection_thread_;
+  std::atomic<bool> connection_worker_running_{true};
+
+  // Verification management
+  struct VerificationRequest {
+    std::string torrent_id;
+    size_t piece_index;
+  };
+  std::queue<VerificationRequest> verification_queue_;
+  std::mutex verification_mutex_;
+  std::condition_variable verification_cv_;
+  std::thread verification_thread_;
+  std::atomic<bool> verification_worker_running_{true};
 };
 
 } // namespace pixelscrape
