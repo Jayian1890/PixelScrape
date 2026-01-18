@@ -84,6 +84,7 @@ private:
   void restore_torrents();
 
   std::unordered_map<std::string, std::unique_ptr<Torrent>> torrents_;
+  std::unordered_map<std::string, std::string> info_hash_to_id_;
   std::unordered_map<std::string, std::vector<PeerInfo>> pending_magnet_peers_;
   std::string download_dir_;
   StateManager state_manager_;

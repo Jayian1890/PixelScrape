@@ -161,6 +161,9 @@ TorrentManager::add_torrent_impl(TorrentMetadata metadata,
       std::thread(&TorrentManager::peer_worker, this, info_hash_hex);
 
   torrents_[info_hash_hex] = std::move(torrent);
+  // Use the moved torrent's metadata to ensure valid memory access
+  std::string info_hash_str(reinterpret_cast<const char*>(torrents_[info_hash_hex]->metadata.info_hash.data()), 20);
+  info_hash_to_id_[info_hash_str] = info_hash_hex;
 
   // Save initial state with torrent data for restoration on restart
   // Only save if we didn't already load an existing state (to preserve
@@ -213,6 +216,8 @@ bool TorrentManager::remove_torrent(const std::string &torrent_id) {
     }
 
     // Move ownership out of map (piece_manager pointer remains valid)
+    std::string info_hash_str(reinterpret_cast<const char*>(it->second->metadata.info_hash.data()), 20);
+    info_hash_to_id_.erase(info_hash_str);
     torrent = std::move(it->second);
     torrents_.erase(it);
   }
