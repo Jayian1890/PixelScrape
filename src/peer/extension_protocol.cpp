@@ -1,6 +1,7 @@
 #include "extension_protocol.hpp"
 #include <arpa/inet.h>
 #include <cstring>
+#include <array>
 
 namespace pixelscrape {
 

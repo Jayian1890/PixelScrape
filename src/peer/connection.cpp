@@ -107,6 +107,7 @@ bool PeerConnection::check_connect_result() {
 }
 
 bool PeerConnection::send_handshake() {
+  std::lock_guard<std::mutex> lock(mutex_);
   // Note: Implicitly assumes socket is writable, caller should check (e.g. via
   // select)
   if (socket_fd_ < 0)
@@ -134,12 +135,54 @@ bool PeerConnection::send_handshake() {
 
   // Send handshake
   ssize_t sent = send(socket_fd_, handshake.data(), handshake.size(), 0);
-  // For simplicity in this step, if we can't send it all at once, we fail.
-  // In a production non-blocking system we'd buffer.
-  if (sent != static_cast<ssize_t>(handshake.size())) {
+  if (sent < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      sent = 0;
+    } else {
+      // Error
+      close(socket_fd_);
+      socket_fd_ = -1;
+      return false;
+    }
+  }
+
+  if (static_cast<size_t>(sent) < handshake.size()) {
+    write_buffer_.insert(write_buffer_.end(), handshake.begin() + sent,
+                         handshake.end());
+  }
+
+  // Returns true to indicate handshake initiated/buffered.
+  // Returns false only on fatal error.
+  return true;
+}
+
+bool PeerConnection::flush_write_buffer() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (socket_fd_ < 0) {
+    return false; // Invalid socket is an error
+  }
+  if (write_buffer_.empty()) {
+    return true; // Nothing to write
+  }
+
+  ssize_t sent =
+      send(socket_fd_, write_buffer_.data(), write_buffer_.size(), 0);
+  if (sent < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return false; // Can't write right now, but not an error
+    }
+    // Error
+    close(socket_fd_);
+    socket_fd_ = -1;
     return false;
   }
-  return true;
+
+  if (sent > 0) {
+    write_buffer_.erase(write_buffer_.begin(),
+                        write_buffer_.begin() + sent);
+  }
+
+  return write_buffer_.empty();
 }
 
 bool PeerConnection::receive_handshake_nonblocking() {
@@ -259,7 +302,65 @@ bool PeerConnection::connect() {
   if (!send_handshake())
     return false;
 
-  // Blocking read handshake using old logic logic wrapper?
+  // Flush write buffer if any data remains
+  // Note: We access write_buffer_ without lock here for checking, but flush_write_buffer locks.
+  // Since we are in the connect sequence (before run thread), this is safe,
+  // but to be strictly correct we could rely on flush_write_buffer's return.
+
+  // Try to flush with a timeout loop
+  int max_retries = 10; // Max retries for select loop to avoid infinite hang
+  int retries = 0;
+
+  while (true) {
+    bool done;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (write_buffer_.empty()) {
+            done = true;
+        } else {
+            done = false;
+        }
+    }
+
+    if (done) break;
+
+    if (retries++ > max_retries) {
+        // Timeout trying to flush buffer
+        close(socket_fd_);
+        socket_fd_ = -1;
+        return false;
+    }
+
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(socket_fd_, &write_fds);
+    struct timeval timeout = {1, 0}; // 1 second per retry
+    int sel_res = select(socket_fd_ + 1, nullptr, &write_fds, nullptr, &timeout);
+
+    if (sel_res < 0) {
+        // Select error
+        close(socket_fd_);
+        socket_fd_ = -1;
+        return false;
+    }
+
+    if (sel_res == 0) {
+        // Timeout on select, continue loop (will hit max_retries eventually)
+        continue;
+    }
+
+    if (!flush_write_buffer()) {
+      // flush_write_buffer returns false on EAGAIN or fatal error.
+      // We check if it was fatal by checking socket_fd_
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (socket_fd_ < 0)
+        return false;
+
+      // If still valid, it was EAGAIN, so we continue loop
+    }
+  }
+
+  // Restore blocking mode for receive
   // Actually we can reuse `perform_handshake` if we strip the connect check.
   // The original `perform_handshake` assumes blocking socket?
   // We set flag to non-blocking in start_connect.

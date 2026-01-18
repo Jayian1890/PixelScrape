@@ -1,6 +1,7 @@
 #include "mse_crypto.hpp"
 #include <cstring>
 #include <stdexcept>
+#include <arpa/inet.h>
 
 namespace pixelscrape {
 
