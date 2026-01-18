@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <array>
 #include <cstring>
+#include <array>
 
 namespace pixelscrape {
 
