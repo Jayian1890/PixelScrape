@@ -121,6 +121,8 @@ private:
 
   // Bootstrap
   void bootstrap();
+  std::vector<std::array<uint8_t, 4>>
+  resolve_hostname(const std::string &hostname);
   bool load_routing_table(const std::string &state_dir);
   void save_routing_table();
 
