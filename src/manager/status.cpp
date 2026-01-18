@@ -23,7 +23,6 @@ TorrentManager::get_torrent_status(const std::string &torrent_id) const {
   size_t upload_speed;
   double completion;
   bool paused;
-  size_t peers_count;
   size_t total_peers_count;
   std::vector<std::shared_ptr<PeerConnection>> peers_copy;
   std::vector<TorrentFile> files;
@@ -47,7 +46,6 @@ TorrentManager::get_torrent_status(const std::string &torrent_id) const {
     download_speed = torrent->download_speed;
     upload_speed = torrent->upload_speed;
     paused = torrent->paused;
-    peers_count = torrent->peers.size();
     total_peers_count =
         torrent->peers.size() + torrent->discovered_peers.size();
     peers_copy = torrent->peers; // Copy shared_ptrs
@@ -60,6 +58,23 @@ TorrentManager::get_torrent_status(const std::string &torrent_id) const {
   // Now call piece manager methods WITHOUT holding the manager lock
   downloaded_bytes = piece_manager_ptr->get_total_downloaded_bytes();
   completion = piece_manager_ptr->get_completion_percentage();
+
+  // Count seeds vs leechers (seeds have all pieces)
+  size_t seeds_count = 0;
+  size_t leechers_count = 0;
+  for (const auto &peer : peers_copy) {
+    if (peer->is_connected()) {
+      const auto &bitfield = peer->get_bitfield();
+      bool is_seed =
+          !bitfield.empty() && std::all_of(bitfield.begin(), bitfield.end(),
+                                           [](bool b) { return b; });
+      if (is_seed) {
+        seeds_count++;
+      } else {
+        leechers_count++;
+      }
+    }
+  }
 
   // Now build the JSON without holding the lock
   pixellib::core::json::JSON status = pixellib::core::json::JSON::object({});
@@ -78,8 +93,10 @@ TorrentManager::get_torrent_status(const std::string &torrent_id) const {
       pixellib::core::json::JSON(static_cast<double>(upload_speed));
   status["completion"] = pixellib::core::json::JSON(completion);
   status["paused"] = pixellib::core::json::JSON(paused);
+  status["seeds"] =
+      pixellib::core::json::JSON(static_cast<double>(seeds_count));
   status["peers"] =
-      pixellib::core::json::JSON(static_cast<double>(peers_count));
+      pixellib::core::json::JSON(static_cast<double>(leechers_count));
   status["total_peers"] =
       pixellib::core::json::JSON(static_cast<double>(total_peers_count));
 

@@ -723,7 +723,7 @@
                                     <div class="torrent-name">${t.name}</div>
                                     <div class="torrent-meta">
                                         <span><i data-lucide="package" style="width:14px"></i> ${this.formatBytes(t.total_size)}</span>
-                                        <span><i data-lucide="users" style="width:14px"></i> ${t.peers} / ${t.total_peers} peers</span>
+                                        <span><i data-lucide="users" style="width:14px"></i> ${t.seeds || 0} Seeds / ${t.peers || 0} Peers</span>
                                         <span class="badge ${t.paused ? 'badge-paused' : 'badge-downloading'}">
                                             ${t.paused ? 'Paused' : (t.completion >= 100 ? 'Seeding' : 'Downloading')}
                                         </span>
