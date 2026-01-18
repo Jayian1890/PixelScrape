@@ -1,3 +1,4 @@
+#include "filesystem.hpp"
 #include "http_server.hpp"
 #include "logging.hpp"
 #include "torrent_manager.hpp"
