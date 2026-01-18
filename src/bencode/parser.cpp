@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <sstream>
 #include <algorithm>
+#include <functional>
 
 namespace pixelscrape {
 
@@ -134,13 +135,17 @@ std::string BencodeParser::encode(const BencodeValue& value) {
         } else if constexpr (std::is_same_v<T, std::unique_ptr<BencodeDict>>) {
             ss << "d";
             // Sort keys lexicographically for deterministic encoding
-            std::vector<std::string> keys;
+            std::vector<std::reference_wrapper<const std::string>> keys;
+            keys.reserve(val->values.size());
             for (const auto& pair : val->values) {
-                keys.push_back(pair.first);
+                keys.push_back(std::cref(pair.first));
             }
-            std::sort(keys.begin(), keys.end());
+            std::sort(keys.begin(), keys.end(), [](const auto& a, const auto& b) {
+                return a.get() < b.get();
+            });
 
-            for (const auto& key : keys) {
+            for (const auto& key_ref : keys) {
+                const auto& key = key_ref.get();
                 ss << key.size() << ":" << key;
                 ss << encode(val->values.at(key));
             }

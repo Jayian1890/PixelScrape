@@ -4,6 +4,7 @@
 #include "dht_protocol.hpp"
 #include <memory>
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <thread>
