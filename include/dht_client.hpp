@@ -6,6 +6,7 @@
 #include <memory>
 #include <atomic>
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <thread>

@@ -15,6 +15,7 @@ endif()
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/doctest
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib
     ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib/include
 )
 
