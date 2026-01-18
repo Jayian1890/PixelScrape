@@ -30,9 +30,9 @@ void MetadataExchange::handle_extension_handshake(
     peer_ut_metadata_id_ = std::nullopt;
   }
 
-  if (ext.metadata_size() > 0) {
+  if (ext.get_peer_metadata_size() > 0) {
     if (!metadata_size_) {
-      metadata_size_ = ext.metadata_size();
+      metadata_size_ = ext.get_peer_metadata_size();
 
       // Calculate number of pieces
       size_t num_pieces =
@@ -42,10 +42,10 @@ void MetadataExchange::handle_extension_handshake(
 
       pixellib::core::logging::Logger::info(
           "Metadata size: {} bytes ({} pieces)", *metadata_size_, num_pieces);
-    } else if (*metadata_size_ != ext.metadata_size()) {
+    } else if (*metadata_size_ != ext.get_peer_metadata_size()) {
       pixellib::core::logging::Logger::warning(
           "Peer reports different metadata size: {} (expected {})",
-          ext.metadata_size(), *metadata_size_);
+          ext.get_peer_metadata_size(), *metadata_size_);
     }
   }
 }
@@ -162,7 +162,7 @@ bool MetadataExchange::verify_metadata() {
 
   SHA1 sha1;
   sha1.update(complete_metadata_);
-  std::array<uint8_t, 20> hash = sha1.final();
+  std::array<uint8_t, 20> hash = sha1.finalize();
 
   return hash == info_hash_;
 }

@@ -169,8 +169,7 @@ bool PeerConnection::flush_write_buffer() {
   }
 
   if (sent > 0) {
-    write_buffer_.erase(write_buffer_.begin(),
-                        write_buffer_.begin() + sent);
+    write_buffer_.erase(write_buffer_.begin(), write_buffer_.begin() + sent);
   }
 
   return write_buffer_.empty();
@@ -727,6 +726,16 @@ void PeerConnection::set_have_piece(size_t piece_index, bool have) {
       send_have(piece_index);
     }
   }
+}
+
+void PeerConnection::send_extended_message(
+    uint8_t extended_msg_id, const std::vector<uint8_t> &payload) {
+  std::vector<uint8_t> extended_payload;
+  extended_payload.reserve(1 + payload.size());
+  extended_payload.push_back(extended_msg_id);
+  extended_payload.insert(extended_payload.end(), payload.begin(),
+                          payload.end());
+  send_message(create_message(PeerMessageType::EXTENDED, extended_payload));
 }
 
 } // namespace pixelscrape

@@ -25,7 +25,8 @@ enum class PeerMessageType : uint8_t {
   PIECE = 7,
   CANCEL = 8,
   PORT = 9,
-  KEEP_ALIVE = 10
+  KEEP_ALIVE = 10,
+  EXTENDED = 20
 };
 
 struct PeerMessage {
@@ -87,6 +88,8 @@ public:
   void send_request(size_t index, size_t begin, size_t length);
   void send_piece(size_t index, size_t begin, const std::vector<uint8_t> &data);
   void set_have_piece(size_t piece_index, bool have);
+  void send_extended_message(uint8_t extended_msg_id,
+                             const std::vector<uint8_t> &payload);
 
   // Callbacks
   using PieceCallback = std::function<void(size_t index, size_t begin,
