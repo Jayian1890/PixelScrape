@@ -1,6 +1,9 @@
 #include "dht_client.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <random>
+#include <thread>
 #include <arpa/inet.h>
 #include <cstring>
 #include <fcntl.h>
@@ -416,7 +419,17 @@ DHTClient::resolve_hostname(const std::string &hostname) {
   hints.ai_family = AF_INET; // DHTNode only supports IPv4
   hints.ai_socktype = SOCK_DGRAM;
 
-  int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &res);
+  int status = 0;
+  // Retry up to 3 times for temporary failures
+  for (int i = 0; i < 3; ++i) {
+    status = getaddrinfo(hostname.c_str(), nullptr, &hints, &res);
+    if (status == 0)
+      break;
+    if (status != EAI_AGAIN)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
   if (status != 0) {
     pixellib::core::logging::Logger::warning(
         "DHT: Failed to resolve hostname {}: {}", hostname,
@@ -435,6 +448,14 @@ DHTClient::resolve_hostname(const std::string &hostname) {
   }
 
   freeaddrinfo(res);
+
+  // Shuffle IPs to distribute load
+  if (!ips.empty()) {
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(ips.begin(), ips.end(), g);
+  }
+
   return ips;
 }
 
@@ -460,6 +481,7 @@ void DHTClient::bootstrap() {
 
   // Bootstrap from public nodes
   for (const auto &[hostname, port] : DHTConfig::bootstrap_nodes()) {
+    // Resolve hostname using robust resolver (getaddrinfo with retries)
     std::vector<std::array<uint8_t, 4>> ips = resolve_hostname(hostname);
     if (ips.empty()) {
       continue;
