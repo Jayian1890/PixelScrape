@@ -206,7 +206,7 @@ private:
   std::mutex lookups_mutex_;
 
   // Rate limiting (IP -> query count in current second)
-  std::unordered_map<std::string,
+  std::unordered_map<uint32_t,
                      std::pair<size_t, std::chrono::steady_clock::time_point>>
       rate_limits_;
   std::mutex rate_limit_mutex_;

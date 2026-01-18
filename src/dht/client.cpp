@@ -878,7 +878,8 @@ void DHTClient::check_node_health() {
 bool DHTClient::check_rate_limit(const std::array<uint8_t, 4> &ip) {
   std::lock_guard<std::mutex> lock(rate_limit_mutex_);
 
-  std::string ip_key(ip.begin(), ip.end());
+  uint32_t ip_key;
+  std::memcpy(&ip_key, ip.data(), 4);
   auto now = std::chrono::steady_clock::now();
 
   auto it = rate_limits_.find(ip_key);
