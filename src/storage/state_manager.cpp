@@ -76,7 +76,7 @@ bool StateManager::save_state(const std::string& info_hash_hex, const TorrentSta
 std::optional<TorrentState> StateManager::load_state(const std::string& info_hash_hex) {
     try {
         auto file_path = get_state_file_path(info_hash_hex);
-        if (!std::filesystem::exists(file_path)) {
+        if (!pixellib::core::filesystem::FileSystem::exists(file_path)) {
             return std::nullopt;
         }
 
