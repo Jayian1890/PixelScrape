@@ -8,14 +8,14 @@ TorrentManager::add_torrent(const std::string &torrent_path,
   std::string data =
       pixellib::core::filesystem::FileSystem::read_file(torrent_path);
   auto metadata = TorrentMetadataParser::parse(data);
-  return add_torrent_impl(std::move(metadata), file_priorities);
+  return add_torrent_impl(std::move(metadata), file_priorities, data);
 }
 
 std::string
 TorrentManager::add_torrent_data(const std::string &data,
                                  const std::vector<size_t> &file_priorities) {
   auto metadata = TorrentMetadataParser::parse(data);
-  return add_torrent_impl(std::move(metadata), file_priorities);
+  return add_torrent_impl(std::move(metadata), file_priorities, data);
 }
 
 std::string TorrentManager::add_magnet_link(const std::string &magnet_uri) {
@@ -106,6 +106,14 @@ std::string TorrentManager::add_magnet_link(const std::string &magnet_uri) {
 std::string
 TorrentManager::add_torrent_impl(TorrentMetadata metadata,
                                  const std::vector<size_t> &file_priorities) {
+  // Delegate to overload with empty torrent data (for magnet links)
+  return add_torrent_impl(std::move(metadata), file_priorities, "");
+}
+
+std::string
+TorrentManager::add_torrent_impl(TorrentMetadata metadata,
+                                 const std::vector<size_t> &file_priorities,
+                                 const std::string &raw_torrent_data) {
   std::string info_hash_hex =
       StateManager::info_hash_to_hex(metadata.info_hash);
 
@@ -153,6 +161,28 @@ TorrentManager::add_torrent_impl(TorrentMetadata metadata,
       std::thread(&TorrentManager::peer_worker, this, info_hash_hex);
 
   torrents_[info_hash_hex] = std::move(torrent);
+
+  // Save initial state with torrent data for restoration on restart
+  // Only save if we didn't already load an existing state (to preserve
+  // progress)
+  if (!raw_torrent_data.empty() && !saved_state) {
+    TorrentState state;
+    state.info_hash_hex = info_hash_hex;
+    state.torrent_data = raw_torrent_data;
+    state.bitfield = torrents_[info_hash_hex]->piece_manager->get_bitfield();
+    state.uploaded_bytes = 0;
+    state.downloaded_bytes = 0;
+    state.file_priorities = torrents_[info_hash_hex]->file_priorities;
+    state.last_updated = std::chrono::system_clock::now();
+    state_manager_.save_state(info_hash_hex, state);
+  } else if (!raw_torrent_data.empty() && saved_state &&
+             saved_state->torrent_data.empty()) {
+    // If we loaded a state but it didn't have torrent_data, update it now
+    TorrentState state = *saved_state;
+    state.torrent_data = raw_torrent_data;
+    state_manager_.save_state(info_hash_hex, state);
+  }
+
   return info_hash_hex;
 }
 

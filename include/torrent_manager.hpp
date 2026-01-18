@@ -68,7 +68,7 @@ public:
   pixellib::core::json::JSON get_global_stats() const;
 
   // Configuration
-  const std::string& get_download_dir() const { return download_dir_; }
+  const std::string &get_download_dir() const { return download_dir_; }
 
 private:
   void tracker_worker(const std::string &torrent_id);
@@ -77,7 +77,11 @@ private:
   void verification_worker();
   std::string add_torrent_impl(TorrentMetadata metadata,
                                const std::vector<size_t> &file_priorities);
+  std::string add_torrent_impl(TorrentMetadata metadata,
+                               const std::vector<size_t> &file_priorities,
+                               const std::string &raw_torrent_data);
   std::array<uint8_t, 20> generate_peer_id();
+  void restore_torrents();
 
   std::unordered_map<std::string, std::unique_ptr<Torrent>> torrents_;
   std::unordered_map<std::string, std::vector<PeerInfo>> pending_magnet_peers_;
