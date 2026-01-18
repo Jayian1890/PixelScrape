@@ -5,7 +5,6 @@
 #include <iomanip>
 #include <json.hpp>
 #include <sstream>
-#include <filesystem>
 
 namespace pixelscrape {
 
