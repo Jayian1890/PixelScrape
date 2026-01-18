@@ -409,6 +409,35 @@ void DHTClient::handle_error(const ErrorMessage &error) {
   }
 }
 
+std::vector<std::array<uint8_t, 4>>
+DHTClient::resolve_hostname(const std::string &hostname) {
+  std::vector<std::array<uint8_t, 4>> ips;
+  struct addrinfo hints {}, *res;
+  hints.ai_family = AF_INET; // DHTNode only supports IPv4
+  hints.ai_socktype = SOCK_DGRAM;
+
+  int status = getaddrinfo(hostname.c_str(), nullptr, &hints, &res);
+  if (status != 0) {
+    pixellib::core::logging::Logger::warning(
+        "DHT: Failed to resolve hostname {}: {}", hostname,
+        gai_strerror(status));
+    return ips;
+  }
+
+  for (struct addrinfo *p = res; p != nullptr; p = p->ai_next) {
+    if (p->ai_family == AF_INET) {
+      struct sockaddr_in *ipv4 =
+          reinterpret_cast<struct sockaddr_in *>(p->ai_addr);
+      std::array<uint8_t, 4> ip;
+      std::memcpy(ip.data(), &ipv4->sin_addr, 4);
+      ips.push_back(ip);
+    }
+  }
+
+  freeaddrinfo(res);
+  return ips;
+}
+
 void DHTClient::bootstrap() {
   pixellib::core::logging::Logger::info("DHT: Starting bootstrap");
 
@@ -431,21 +460,21 @@ void DHTClient::bootstrap() {
 
   // Bootstrap from public nodes
   for (const auto &[hostname, port] : DHTConfig::bootstrap_nodes()) {
-    // Resolve hostname (simplified - in production use proper DNS resolution)
-    struct hostent *host = gethostbyname(hostname.c_str());
-    if (!host)
+    std::vector<std::array<uint8_t, 4>> ips = resolve_hostname(hostname);
+    if (ips.empty()) {
       continue;
+    }
 
-    std::array<uint8_t, 4> ip;
-    std::memcpy(ip.data(), host->h_addr_list[0], 4);
+    for (const auto &ip : ips) {
+      DHTNode bootstrap_node;
+      bootstrap_node.id =
+          NodeID::generate_random(); // We don't know their ID yet
+      bootstrap_node.ip = ip;
+      bootstrap_node.port = port;
+      bootstrap_node.last_seen = std::chrono::steady_clock::now();
 
-    DHTNode bootstrap_node;
-    bootstrap_node.id = NodeID::generate_random(); // We don't know their ID yet
-    bootstrap_node.ip = ip;
-    bootstrap_node.port = port;
-    bootstrap_node.last_seen = std::chrono::steady_clock::now();
-
-    send_find_node(bootstrap_node, own_id_);
+      send_find_node(bootstrap_node, own_id_);
+    }
   }
 
   // Wait a bit for responses

@@ -134,12 +134,46 @@ bool PeerConnection::send_handshake() {
 
   // Send handshake
   ssize_t sent = send(socket_fd_, handshake.data(), handshake.size(), 0);
-  // For simplicity in this step, if we can't send it all at once, we fail.
-  // In a production non-blocking system we'd buffer.
-  if (sent != static_cast<ssize_t>(handshake.size())) {
+  if (sent < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      sent = 0;
+    } else {
+      return false;
+    }
+  }
+
+  if (static_cast<size_t>(sent) < handshake.size()) {
+    write_buffer_.insert(write_buffer_.end(), handshake.begin() + sent,
+                         handshake.end());
+  }
+
+  return true;
+}
+
+bool PeerConnection::flush_write_buffer() {
+  if (socket_fd_ < 0 || write_buffer_.empty()) {
+    return true; // Nothing to write or invalid socket (should we return false
+                 // for invalid socket?)
+  }
+
+  ssize_t sent =
+      send(socket_fd_, write_buffer_.data(), write_buffer_.size(), 0);
+  if (sent < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      return false; // Can't write right now
+    }
+    // Error
+    close(socket_fd_);
+    socket_fd_ = -1;
     return false;
   }
-  return true;
+
+  if (sent > 0) {
+    write_buffer_.erase(write_buffer_.begin(),
+                        write_buffer_.begin() + sent);
+  }
+
+  return write_buffer_.empty();
 }
 
 bool PeerConnection::receive_handshake_nonblocking() {
@@ -259,6 +293,30 @@ bool PeerConnection::connect() {
   if (!send_handshake())
     return false;
 
+  // Flush write buffer if any data remains
+  if (!write_buffer_.empty()) {
+    while (!write_buffer_.empty()) {
+      fd_set write_fds;
+      FD_ZERO(&write_fds);
+      FD_SET(socket_fd_, &write_fds);
+      struct timeval timeout = {3, 0};
+      if (select(socket_fd_ + 1, nullptr, &write_fds, nullptr, &timeout) <= 0) {
+        close(socket_fd_);
+        socket_fd_ = -1;
+        return false;
+      }
+      if (!flush_write_buffer()) {
+        // Either error or still full (but select said writable?)
+        // If it was just EAGAIN we loop, but flush_write_buffer returns false
+        // on error. Wait, flush_write_buffer returns false on EAGAIN too.
+        // We should check if socket is still valid?
+        if (socket_fd_ < 0)
+          return false;
+        // If EAGAIN, we continue loop.
+      }
+    }
+  }
+
   // Blocking read handshake using old logic logic wrapper?
   // Actually we can reuse `perform_handshake` if we strip the connect check.
   // The original `perform_handshake` assumes blocking socket?
@@ -361,7 +419,7 @@ void PeerConnection::set_interested(bool interested) {
 }
 
 void PeerConnection::handle_message(const PeerMessage &message) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
 
   switch (message.type) {
   case PeerMessageType::CHOKE:
@@ -430,7 +488,10 @@ void PeerConnection::handle_message(const PeerMessage &message) {
                                 message.payload.end());
 
       if (piece_callback_) {
-        piece_callback_(index, begin, data);
+        auto cb = piece_callback_;
+        lock.unlock();
+        cb(index, begin, data);
+        lock.lock();
       }
     }
     break;
@@ -459,6 +520,7 @@ PeerConnection::create_message(PeerMessageType type,
 std::vector<uint8_t>
 PeerConnection::serialize_message(const PeerMessage &message) {
   std::vector<uint8_t> data;
+  data.reserve(4 + 1 + message.payload.size());
 
   // Add payload length (4 bytes, big-endian)
   uint32_t length = 1 + message.payload.size(); // +1 for message type

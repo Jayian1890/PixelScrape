@@ -1,4 +1,5 @@
 #include "mse_crypto.hpp"
+#include <arpa/inet.h>
 #include <cstring>
 #include <stdexcept>
 #include <arpa/inet.h>

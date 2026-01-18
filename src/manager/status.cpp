@@ -141,7 +141,17 @@ void TorrentManager::update_speeds() {
   }
   // Lock released
 
-  // Query piece managers without holding lock
+  // Structure to hold calculated speed updates
+  struct SpeedUpdate {
+    std::string id;
+    size_t down_speed;
+    size_t up_speed;
+    size_t downloaded;
+    size_t uploaded;
+  };
+  std::vector<SpeedUpdate> speed_updates;
+
+  // Query piece managers and calculate speeds WITHOUT holding lock
   for (auto &data : update_list) {
     size_t downloaded = data.piece_manager->get_total_downloaded_bytes();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -158,15 +168,22 @@ void TorrentManager::update_speeds() {
         static_cast<size_t>(diff_down * 1000.0 / duration.count());
     size_t up_speed = static_cast<size_t>(diff_up * 1000.0 / duration.count());
 
-    // Now update the torrent with new values
+    speed_updates.push_back(
+        {data.id, down_speed, up_speed, downloaded, data.uploaded_bytes});
+  }
+
+  // Single lock acquisition to apply ALL updates (prevents lock churn)
+  {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = torrents_.find(data.id);
-    if (it != torrents_.end()) {
-      it->second->download_speed = down_speed;
-      it->second->upload_speed = up_speed;
-      it->second->last_downloaded_bytes = downloaded;
-      it->second->last_uploaded_bytes = data.uploaded_bytes;
-      it->second->last_speed_update = now;
+    for (const auto &update : speed_updates) {
+      auto it = torrents_.find(update.id);
+      if (it != torrents_.end()) {
+        it->second->download_speed = update.down_speed;
+        it->second->upload_speed = update.up_speed;
+        it->second->last_downloaded_bytes = update.downloaded;
+        it->second->last_uploaded_bytes = update.uploaded;
+        it->second->last_speed_update = now;
+      }
     }
   }
 }
@@ -185,8 +202,8 @@ pixellib::core::json::JSON TorrentManager::get_global_stats() const {
   size_t total_up_speed = 0;
 
   for (const auto &pair : torrents_) {
-    total_downloaded +=
-        pair.second->piece_manager->get_total_downloaded_bytes();
+    // Use cached values instead of calling piece_manager (avoids deadlock)
+    total_downloaded += pair.second->last_downloaded_bytes;
     total_uploaded += pair.second->uploaded_bytes;
     active_peers += pair.second->peers.size();
     total_down_speed += pair.second->download_speed;

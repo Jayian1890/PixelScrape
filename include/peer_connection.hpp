@@ -142,6 +142,10 @@ private:
   std::vector<uint8_t> handshake_buffer_;
   size_t handshake_bytes_received_;
 
+  // Write buffering for non-blocking sends
+  std::vector<uint8_t> write_buffer_;
+  bool flush_write_buffer();
+
   mutable std::mutex mutex_;
 };
 

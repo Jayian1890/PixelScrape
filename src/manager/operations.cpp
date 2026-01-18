@@ -158,6 +158,7 @@ TorrentManager::add_torrent_impl(TorrentMetadata metadata,
 
 bool TorrentManager::remove_torrent(const std::string &torrent_id) {
   std::unique_ptr<Torrent> torrent;
+  TorrentState state;
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -167,16 +168,12 @@ bool TorrentManager::remove_torrent(const std::string &torrent_id) {
       return false;
     }
 
-    // Save state before removing
-    TorrentState state;
+    // Prepare state - copy values that don't need piece_manager lock
     state.info_hash_hex = torrent_id;
-    state.bitfield = it->second->piece_manager->get_bitfield();
     state.uploaded_bytes = it->second->uploaded_bytes;
     state.downloaded_bytes = it->second->downloaded_bytes;
     state.file_priorities = it->second->file_priorities;
     state.last_updated = std::chrono::system_clock::now();
-
-    state_manager_.save_state(torrent_id, state);
 
     // Signal stop
     {
@@ -185,10 +182,16 @@ bool TorrentManager::remove_torrent(const std::string &torrent_id) {
       it->second->cv.notify_all();
     }
 
-    // Move ownership out of map
+    // Move ownership out of map (piece_manager pointer remains valid)
     torrent = std::move(it->second);
     torrents_.erase(it);
   }
+  // mutex_ released here
+
+  // Get bitfield AFTER releasing mutex_ to avoid deadlock
+  // (piece_manager is still valid since we own the torrent)
+  state.bitfield = torrent->piece_manager->get_bitfield();
+  state_manager_.save_state(torrent_id, state);
 
   // Stop threads outside the lock
   if (torrent->tracker_thread.joinable()) {

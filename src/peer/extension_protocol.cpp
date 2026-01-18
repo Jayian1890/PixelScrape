@@ -1,5 +1,6 @@
 #include "extension_protocol.hpp"
 #include <arpa/inet.h>
+#include <array>
 #include <cstring>
 #include <array>
 
