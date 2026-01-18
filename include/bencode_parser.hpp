@@ -33,6 +33,7 @@ struct BencodeDict {
 class BencodeParser {
 public:
     static BencodeValue parse(const std::string& data);
+    static BencodeValue parse(const std::string& data, size_t& consumed);
     static std::string encode(const BencodeValue& value);
 
 private:

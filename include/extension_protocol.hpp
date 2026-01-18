@@ -4,7 +4,8 @@
 #include <map>
 #include <string>
 #include <vector>
-#include <json.hpp>
+#include <array>
+#include "bencode_parser.hpp"
 
 namespace pixelscrape {
 

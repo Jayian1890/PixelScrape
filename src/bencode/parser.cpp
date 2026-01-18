@@ -8,8 +8,15 @@ namespace pixelscrape {
 BencodeParser::BencodeParser(const std::string& data) : data_(data), pos_(0) {}
 
 BencodeValue BencodeParser::parse(const std::string& data) {
+    size_t consumed;
+    return parse(data, consumed);
+}
+
+BencodeValue BencodeParser::parse(const std::string& data, size_t& consumed) {
     BencodeParser parser(data);
-    return parser.parse_value();
+    BencodeValue value = parser.parse_value();
+    consumed = parser.pos_;
+    return value;
 }
 
 BencodeValue BencodeParser::parse_value() {

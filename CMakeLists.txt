@@ -16,6 +16,7 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/external/doctest
     ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib/include
 )
 
 # Source files
@@ -70,3 +71,16 @@ install(TARGETS pixelscrape DESTINATION bin)
 
 # Copy frontend files to build directory
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/frontend/index.html ${CMAKE_CURRENT_BINARY_DIR}/frontend/index.html COPYONLY)
+
+# Test executable
+add_executable(test_extension_protocol
+    tests/test_extension_protocol.cpp
+    src/peer/extension_protocol.cpp
+    src/bencode/parser.cpp
+)
+target_include_directories(test_extension_protocol PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/doctest
+    ${CMAKE_CURRENT_SOURCE_DIR}/external/pixellib
+)
+target_compile_definitions(test_extension_protocol PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
