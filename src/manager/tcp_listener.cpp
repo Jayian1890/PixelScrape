@@ -94,11 +94,10 @@ void TorrentManager::tcp_listener(uint16_t port) {
     std::string matched_torrent_id;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      for (const auto &p : torrents_) {
-        if (p.second->metadata.info_hash == remote_info_hash) {
-          matched_torrent_id = p.first;
-          break;
-        }
+      std::string info_hash_str(reinterpret_cast<const char*>(remote_info_hash.data()), 20);
+      auto it = info_hash_to_id_.find(info_hash_str);
+      if (it != info_hash_to_id_.end()) {
+        matched_torrent_id = it->second;
       }
     }
 
