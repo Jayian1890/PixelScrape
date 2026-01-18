@@ -63,6 +63,18 @@ public:
   std::optional<pixellib::core::json::JSON>
   get_torrent_status(const std::string &torrent_id) const;
 
+  /**
+   * @brief Retrieves the status of multiple torrents in a single batch operation.
+   * This is more efficient than calling get_torrent_status() for each ID as it
+   * acquires the manager lock only once.
+   *
+   * @param torrent_ids List of torrent IDs to retrieve status for. If empty,
+   *                    returns status for all managed torrents.
+   * @return std::vector<pixellib::core::json::JSON> List of status objects.
+   */
+  std::vector<pixellib::core::json::JSON>
+  get_torrents_status(const std::vector<std::string> &torrent_ids) const;
+
   // Statistics
   void update_speeds();
   pixellib::core::json::JSON get_global_stats() const;

@@ -54,50 +54,58 @@ TransmissionRpcHandler::torrent_get(const pixellib::core::json::JSON &args,
                                     const pixellib::core::json::JSON &tag) {
   (void)args;
   auto torrent_ids = torrent_manager_->list_torrents();
+
+  // Use batch status retrieval
+  auto statuses = torrent_manager_->get_torrents_status(torrent_ids);
+
   pixellib::core::json::JSON torrents_array =
       pixellib::core::json::JSON::array({});
 
-  for (const auto &id : torrent_ids) {
-    auto status = torrent_manager_->get_torrent_status(id);
-    if (status) {
-      pixellib::core::json::JSON t = pixellib::core::json::JSON::object({});
-      t["id"] = pixellib::core::json::JSON(id);
-      t["name"] = status->find("name") ? (*status)["name"]
-                                       : pixellib::core::json::JSON("Unknown");
-      t["totalSize"] = status->find("total_size")
-                           ? (*status)["total_size"]
-                           : pixellib::core::json::JSON(0.0);
-      t["percentDone"] =
-          status->find("completion")
-              ? pixellib::core::json::JSON(
-                    (*status)["completion"].as_number().to_double() / 100.0)
-              : pixellib::core::json::JSON(0.0);
+  for (auto &status : statuses) {
+    pixellib::core::json::JSON t = pixellib::core::json::JSON::object({});
 
-      // Use actual download/upload speeds from status
-      double down_rate = 0.0;
-      double up_rate = 0.0;
-      if (auto down_speed = status->find("download_speed");
-          down_speed && down_speed->is_number()) {
-        down_rate = down_speed->as_number().to_double();
-      }
-      if (auto up_speed = status->find("upload_speed");
-          up_speed && up_speed->is_number()) {
-        up_rate = up_speed->as_number().to_double();
-      }
-
-      t["rateDownload"] = pixellib::core::json::JSON(down_rate);
-      t["rateUpload"] = pixellib::core::json::JSON(up_rate);
-      t["status"] = (*status)["paused"].as_bool()
-                        ? pixellib::core::json::JSON(0.0)
-                        : pixellib::core::json::JSON(4.0); // 4 = downloading
-      t["peersGettingFromUs"] = status->find("peers")
-                                    ? (*status)["peers"]
-                                    : pixellib::core::json::JSON(0.0);
-      t["peersSendingToUs"] = status->find("peers")
-                                  ? (*status)["peers"]
-                                  : pixellib::core::json::JSON(0.0);
-      torrents_array.push_back(t);
+    // Extract ID safely
+    std::string id_str = "";
+    if (auto info_hash = status.find("info_hash"); info_hash && info_hash->is_string()) {
+        id_str = info_hash->as_string();
     }
+    t["id"] = pixellib::core::json::JSON(id_str);
+
+    t["name"] = status.find("name") ? status["name"]
+                                     : pixellib::core::json::JSON("Unknown");
+    t["totalSize"] = status.find("total_size")
+                         ? status["total_size"]
+                         : pixellib::core::json::JSON(0.0);
+    t["percentDone"] =
+        status.find("completion")
+            ? pixellib::core::json::JSON(
+                  status["completion"].as_number().to_double() / 100.0)
+            : pixellib::core::json::JSON(0.0);
+
+    // Use actual download/upload speeds from status
+    double down_rate = 0.0;
+    double up_rate = 0.0;
+    if (auto down_speed = status.find("download_speed");
+        down_speed && down_speed->is_number()) {
+      down_rate = down_speed->as_number().to_double();
+    }
+    if (auto up_speed = status.find("upload_speed");
+        up_speed && up_speed->is_number()) {
+      up_rate = up_speed->as_number().to_double();
+    }
+
+    t["rateDownload"] = pixellib::core::json::JSON(down_rate);
+    t["rateUpload"] = pixellib::core::json::JSON(up_rate);
+    t["status"] = status["paused"].as_bool()
+                      ? pixellib::core::json::JSON(0.0)
+                      : pixellib::core::json::JSON(4.0); // 4 = downloading
+    t["peersGettingFromUs"] = status.find("peers")
+                                  ? status["peers"]
+                                  : pixellib::core::json::JSON(0.0);
+    t["peersSendingToUs"] = status.find("peers")
+                                ? status["peers"]
+                                : pixellib::core::json::JSON(0.0);
+    torrents_array.push_back(t);
   }
 
   pixellib::core::json::JSON arguments = pixellib::core::json::JSON::object({});

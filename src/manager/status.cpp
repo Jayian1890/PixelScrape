@@ -2,6 +2,60 @@
 
 namespace pixelscrape {
 
+namespace {
+
+// Internal struct to hold copied data for status generation
+struct TorrentStatusData {
+    std::string id;
+    std::string name;
+    size_t total_length;
+    size_t uploaded_bytes;
+    size_t download_speed;
+    size_t upload_speed;
+    bool paused;
+    size_t peers_count;
+    size_t total_peers_count;
+    std::vector<TorrentFile> files;
+    std::vector<size_t> file_priorities;
+    PieceManager* piece_manager_ptr;
+};
+
+// Helper to build JSON from status data
+pixellib::core::json::JSON build_status_json(const TorrentStatusData& data) {
+    size_t downloaded_bytes = data.piece_manager_ptr->get_total_downloaded_bytes();
+    double completion = data.piece_manager_ptr->get_completion_percentage();
+
+    pixellib::core::json::JSON status = pixellib::core::json::JSON::object({});
+
+    status["name"] = pixellib::core::json::JSON(data.name);
+    status["info_hash"] = pixellib::core::json::JSON(data.id);
+    status["total_size"] = pixellib::core::json::JSON(static_cast<double>(data.total_length));
+    status["downloaded"] = pixellib::core::json::JSON(static_cast<double>(downloaded_bytes));
+    status["uploaded"] = pixellib::core::json::JSON(static_cast<double>(data.uploaded_bytes));
+    status["download_speed"] = pixellib::core::json::JSON(static_cast<double>(data.download_speed));
+    status["upload_speed"] = pixellib::core::json::JSON(static_cast<double>(data.upload_speed));
+    status["completion"] = pixellib::core::json::JSON(completion);
+    status["paused"] = pixellib::core::json::JSON(data.paused);
+    status["peers"] = pixellib::core::json::JSON(static_cast<double>(data.peers_count));
+    status["total_peers"] = pixellib::core::json::JSON(static_cast<double>(data.total_peers_count));
+    status["peers_list"] = pixellib::core::json::JSON::array({});
+
+    pixellib::core::json::JSON files_json = pixellib::core::json::JSON::array({});
+    for (size_t i = 0; i < data.files.size(); ++i) {
+        const auto &file = data.files[i];
+        pixellib::core::json::JSON file_obj = pixellib::core::json::JSON::object({});
+        file_obj["path"] = pixellib::core::json::JSON(file.path);
+        file_obj["size"] = pixellib::core::json::JSON(static_cast<double>(file.length));
+        file_obj["priority"] = pixellib::core::json::JSON(static_cast<double>(data.file_priorities[i]));
+        files_json.push_back(file_obj);
+    }
+    status["files"] = files_json;
+
+    return status;
+}
+
+} // namespace
+
 std::vector<std::string> TorrentManager::list_torrents() const {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -14,21 +68,7 @@ std::vector<std::string> TorrentManager::list_torrents() const {
 
 std::optional<pixellib::core::json::JSON>
 TorrentManager::get_torrent_status(const std::string &torrent_id) const {
-  // Copy all needed data while holding the lock
-  std::string name;
-  size_t total_length;
-  size_t downloaded_bytes;
-  size_t uploaded_bytes;
-  size_t download_speed;
-  size_t upload_speed;
-  double completion;
-  bool paused;
-  size_t peers_count;
-  size_t total_peers_count;
-  std::vector<std::shared_ptr<PeerConnection>> peers_copy;
-  std::vector<TorrentFile> files;
-  std::vector<size_t> file_priorities;
-  PieceManager *piece_manager_ptr = nullptr;
+  TorrentStatusData data;
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -39,70 +79,88 @@ TorrentManager::get_torrent_status(const std::string &torrent_id) const {
     }
 
     const auto &torrent = it->second;
-
-    // Copy all data we need (but DON'T call methods that acquire locks!)
-    name = torrent->metadata.name;
-    total_length = torrent->metadata.total_length;
-    uploaded_bytes = torrent->uploaded_bytes;
-    download_speed = torrent->download_speed;
-    upload_speed = torrent->upload_speed;
-    paused = torrent->paused;
-    peers_count = torrent->peers.size();
-    total_peers_count =
-        torrent->peers.size() + torrent->discovered_peers.size();
-    peers_copy = torrent->peers; // Copy shared_ptrs
-    files = torrent->metadata.files;
-    file_priorities = torrent->file_priorities;
-    piece_manager_ptr = torrent->piece_manager.get(); // Just get the pointer
+    data.id = torrent_id;
+    data.name = torrent->metadata.name;
+    data.total_length = torrent->metadata.total_length;
+    data.uploaded_bytes = torrent->uploaded_bytes;
+    data.download_speed = torrent->download_speed;
+    data.upload_speed = torrent->upload_speed;
+    data.paused = torrent->paused;
+    data.peers_count = torrent->peers.size();
+    data.total_peers_count = torrent->peers.size() + torrent->discovered_peers.size();
+    data.files = torrent->metadata.files;
+    data.file_priorities = torrent->file_priorities;
+    data.piece_manager_ptr = torrent->piece_manager.get();
   }
-  // Lock is released here
 
-  // Now call piece manager methods WITHOUT holding the manager lock
-  downloaded_bytes = piece_manager_ptr->get_total_downloaded_bytes();
-  completion = piece_manager_ptr->get_completion_percentage();
+  return build_status_json(data);
+}
 
-  // Now build the JSON without holding the lock
-  pixellib::core::json::JSON status = pixellib::core::json::JSON::object({});
+std::vector<pixellib::core::json::JSON>
+TorrentManager::get_torrents_status(const std::vector<std::string> &torrent_ids) const {
+  std::vector<TorrentStatusData> data_list;
 
-  status["name"] = pixellib::core::json::JSON(name);
-  status["info_hash"] = pixellib::core::json::JSON(torrent_id);
-  status["total_size"] =
-      pixellib::core::json::JSON(static_cast<double>(total_length));
-  status["downloaded"] =
-      pixellib::core::json::JSON(static_cast<double>(downloaded_bytes));
-  status["uploaded"] =
-      pixellib::core::json::JSON(static_cast<double>(uploaded_bytes));
-  status["download_speed"] =
-      pixellib::core::json::JSON(static_cast<double>(download_speed));
-  status["upload_speed"] =
-      pixellib::core::json::JSON(static_cast<double>(upload_speed));
-  status["completion"] = pixellib::core::json::JSON(completion);
-  status["paused"] = pixellib::core::json::JSON(paused);
-  status["peers"] =
-      pixellib::core::json::JSON(static_cast<double>(peers_count));
-  status["total_peers"] =
-      pixellib::core::json::JSON(static_cast<double>(total_peers_count));
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
 
-  // Skip detailed peer list to avoid deadlock
-  // (peer threads may call back into torrent manager via piece_callback)
-  status["peers_list"] = pixellib::core::json::JSON::array({});
+    if (torrent_ids.empty()) {
+        // Retrieve all torrents
+        data_list.reserve(torrents_.size());
+        for (const auto &pair : torrents_) {
+            const auto &id = pair.first;
+            const auto &torrent = pair.second;
 
-  // File list
-  pixellib::core::json::JSON files_json = pixellib::core::json::JSON::array({});
-  for (size_t i = 0; i < files.size(); ++i) {
-    const auto &file = files[i];
-    pixellib::core::json::JSON file_obj =
-        pixellib::core::json::JSON::object({});
-    file_obj["path"] = pixellib::core::json::JSON(file.path);
-    file_obj["size"] =
-        pixellib::core::json::JSON(static_cast<double>(file.length));
-    file_obj["priority"] =
-        pixellib::core::json::JSON(static_cast<double>(file_priorities[i]));
-    files_json.push_back(file_obj);
+            TorrentStatusData data;
+            data.id = id;
+            data.name = torrent->metadata.name;
+            data.total_length = torrent->metadata.total_length;
+            data.uploaded_bytes = torrent->uploaded_bytes;
+            data.download_speed = torrent->download_speed;
+            data.upload_speed = torrent->upload_speed;
+            data.paused = torrent->paused;
+            data.peers_count = torrent->peers.size();
+            data.total_peers_count = torrent->peers.size() + torrent->discovered_peers.size();
+            data.files = torrent->metadata.files;
+            data.file_priorities = torrent->file_priorities;
+            data.piece_manager_ptr = torrent->piece_manager.get();
+
+            data_list.push_back(std::move(data));
+        }
+    } else {
+        // Retrieve specific torrents
+        data_list.reserve(torrent_ids.size());
+        for (const auto &id : torrent_ids) {
+            auto it = torrents_.find(id);
+            if (it != torrents_.end()) {
+                const auto &torrent = it->second;
+
+                TorrentStatusData data;
+                data.id = id;
+                data.name = torrent->metadata.name;
+                data.total_length = torrent->metadata.total_length;
+                data.uploaded_bytes = torrent->uploaded_bytes;
+                data.download_speed = torrent->download_speed;
+                data.upload_speed = torrent->upload_speed;
+                data.paused = torrent->paused;
+                data.peers_count = torrent->peers.size();
+                data.total_peers_count = torrent->peers.size() + torrent->discovered_peers.size();
+                data.files = torrent->metadata.files;
+                data.file_priorities = torrent->file_priorities;
+                data.piece_manager_ptr = torrent->piece_manager.get();
+
+                data_list.push_back(std::move(data));
+            }
+        }
+    }
   }
-  status["files"] = files_json;
 
-  return status;
+  std::vector<pixellib::core::json::JSON> result;
+  result.reserve(data_list.size());
+  for (const auto &data : data_list) {
+      result.push_back(build_status_json(data));
+  }
+
+  return result;
 }
 
 void TorrentManager::update_speeds() {
