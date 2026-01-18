@@ -94,6 +94,12 @@
             box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
         }
 
+        .nav-item:focus-visible {
+            outline: 2px solid var(--primary);
+            outline-offset: -2px;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
         .nav-count {
             margin-left: auto;
             font-size: 12px;
@@ -459,27 +465,27 @@
             <span>PixelScrape</span>
         </div>
         <nav class="nav-group">
-            <div class="nav-item active" onclick="client.filterTorrents('all', event)">
+            <div class="nav-item active" role="button" tabindex="0" onclick="client.filterTorrents('all', event)" onkeydown="client.handleNavKey(event, 'all')">
                 <i data-lucide="layout-grid"></i>
                 <span>All Torrents</span>
                 <span class="nav-count" id="count-all">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('downloading', event)">
+            <div class="nav-item" role="button" tabindex="0" onclick="client.filterTorrents('downloading', event)" onkeydown="client.handleNavKey(event, 'downloading')">
                 <i data-lucide="download-cloud"></i>
                 <span>Downloading</span>
                 <span class="nav-count" id="count-down">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('completed', event)">
+            <div class="nav-item" role="button" tabindex="0" onclick="client.filterTorrents('completed', event)" onkeydown="client.handleNavKey(event, 'completed')">
                 <i data-lucide="check-circle"></i>
                 <span>Completed</span>
                 <span class="nav-count" id="count-done">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('active', event)">
+            <div class="nav-item" role="button" tabindex="0" onclick="client.filterTorrents('active', event)" onkeydown="client.handleNavKey(event, 'active')">
                 <i data-lucide="activity"></i>
                 <span>Active</span>
                 <span class="nav-count" id="count-active">0</span>
             </div>
-            <div class="nav-item" onclick="client.filterTorrents('paused', event)">
+            <div class="nav-item" role="button" tabindex="0" onclick="client.filterTorrents('paused', event)" onkeydown="client.handleNavKey(event, 'paused')">
                 <i data-lucide="pause-circle"></i>
                 <span>Paused</span>
                 <span class="nav-count" id="count-paused">0</span>
@@ -671,6 +677,13 @@
                 const target = event ? event.currentTarget : document.querySelector(`.nav-item:nth-child(${['all', 'downloading', 'completed', 'active', 'paused'].indexOf(type) + 1})`);
                 if (target) target.classList.add('active');
                 this.renderTorrents();
+            }
+
+            handleNavKey(event, type) {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    this.filterTorrents(type, event);
+                }
             }
 
             togglePeers(id) {
