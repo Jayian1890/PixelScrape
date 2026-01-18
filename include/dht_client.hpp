@@ -3,6 +3,7 @@
 #include "dht_node.hpp"
 #include "dht_protocol.hpp"
 #include <memory>
+#include <atomic>
 
 #include <condition_variable>
 #include <functional>
