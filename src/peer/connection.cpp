@@ -361,7 +361,7 @@ void PeerConnection::set_interested(bool interested) {
 }
 
 void PeerConnection::handle_message(const PeerMessage &message) {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
 
   switch (message.type) {
   case PeerMessageType::CHOKE:
@@ -430,7 +430,10 @@ void PeerConnection::handle_message(const PeerMessage &message) {
                                 message.payload.end());
 
       if (piece_callback_) {
-        piece_callback_(index, begin, data);
+        auto cb = piece_callback_;
+        lock.unlock();
+        cb(index, begin, data);
+        lock.lock();
       }
     }
     break;
