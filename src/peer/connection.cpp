@@ -520,6 +520,7 @@ PeerConnection::create_message(PeerMessageType type,
 std::vector<uint8_t>
 PeerConnection::serialize_message(const PeerMessage &message) {
   std::vector<uint8_t> data;
+  data.reserve(4 + 1 + message.payload.size());
 
   // Add payload length (4 bytes, big-endian)
   uint32_t length = 1 + message.payload.size(); // +1 for message type
