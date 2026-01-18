@@ -28,6 +28,55 @@ void signal_handler(int signal) {
   running = false;
 }
 
+// Helper to compare JSON objects to avoid expensive stringification
+bool json_equals(const pixellib::core::json::JSON &a,
+                 const pixellib::core::json::JSON &b) {
+  if (a.type() != b.type()) {
+    return false;
+  }
+
+  if (a.is_null()) {
+    return true;
+  } else if (a.is_bool()) {
+    return a.as_bool() == b.as_bool();
+  } else if (a.is_number()) {
+    return a.as_number().repr == b.as_number().repr;
+  } else if (a.is_string()) {
+    return a.as_string() == b.as_string();
+  } else if (a.is_array()) {
+    const auto &arr_a = a.as_array();
+    const auto &arr_b = b.as_array();
+    if (arr_a.size() != arr_b.size()) {
+      return false;
+    }
+    for (size_t i = 0; i < arr_a.size(); ++i) {
+      if (!json_equals(arr_a[i], arr_b[i])) {
+        return false;
+      }
+    }
+    return true;
+  } else if (a.is_object()) {
+    const auto &obj_a = a.as_object();
+    const auto &obj_b = b.as_object();
+    if (obj_a.size() != obj_b.size()) {
+      return false;
+    }
+    // Note: This assumes keys are in the same order.
+    // Since we construct the JSON in the same order in the loop, this is valid.
+    // If key order is not guaranteed, we'd need a map or O(N^2) search.
+    // Given the loop constructs 'update' similarly each time, direct comparison
+    // is likely sufficient and fast.
+    for (size_t i = 0; i < obj_a.size(); ++i) {
+      if (obj_a[i].first != obj_b[i].first ||
+          !json_equals(obj_a[i].second, obj_b[i].second)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
@@ -280,6 +329,11 @@ int main(int argc, char *argv[]) {
         "PixelScrape started - HTTP server on port 8080, WebSocket on port "
         "8081");
 
+    // Store last update as JSON object to avoid stringification if identical
+    pixellib::core::json::JSON last_update_json =
+        pixellib::core::json::JSON::object({});
+    bool first_broadcast = true;
+
     // Main loop
     while (running) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -301,9 +355,15 @@ int main(int argc, char *argv[]) {
       }
       update["torrents"] = torrent_array;
 
-      pixellib::core::json::StringifyOptions ws_options;
-      ws_options.pretty = false;
-      ws_server.broadcast_text(update.stringify(ws_options));
+      // Only broadcast if state has changed
+      if (first_broadcast || !json_equals(update, last_update_json)) {
+        pixellib::core::json::StringifyOptions ws_options;
+        ws_options.pretty = false;
+        ws_server.broadcast_text(update.stringify(ws_options));
+
+        last_update_json = std::move(update);
+        first_broadcast = false;
+      }
     }
 
     std::cout << "\nShutting down PixelScrape..." << std::endl;

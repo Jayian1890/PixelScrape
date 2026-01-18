@@ -1,12 +1,4 @@
 #include "state_manager.hpp"
-<<<<<<< Updated upstream
-#include <json.hpp>
-#include <filesystem.hpp>
-#include <filesystem>
-#include <sstream>
-#include <iomanip>
-=======
->>>>>>> Stashed changes
 #include <ctime>
 #include <filesystem.hpp>
 #include <iomanip>
