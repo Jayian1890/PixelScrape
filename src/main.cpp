@@ -319,7 +319,6 @@ int main(int argc, char *argv[]) {
     // Start servers
     http_server.start();
     ws_server.start();
-
     std::cout << "\nPixelScrape started successfully!" << std::endl;
     std::cout << "HTTP API available at: http://localhost:8080" << std::endl;
     std::cout << "WebSocket available at: ws://localhost:8081" << std::endl;

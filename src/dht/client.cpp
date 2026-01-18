@@ -415,7 +415,7 @@ void DHTClient::handle_error(const ErrorMessage &error) {
 std::vector<std::array<uint8_t, 4>>
 DHTClient::resolve_hostname(const std::string &hostname) {
   std::vector<std::array<uint8_t, 4>> ips;
-  struct addrinfo hints {}, *res;
+  struct addrinfo hints{}, *res;
   hints.ai_family = AF_INET; // DHTNode only supports IPv4
   hints.ai_socktype = SOCK_DGRAM;
 

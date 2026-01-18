@@ -4,7 +4,6 @@
 #include "dht_protocol.hpp"
 #include <atomic>
 #include <memory>
-#include <atomic>
 
 #include <atomic>
 #include <condition_variable>
@@ -12,7 +11,6 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
-#include <atomic>
 
 namespace pixelscrape {
 namespace dht {
