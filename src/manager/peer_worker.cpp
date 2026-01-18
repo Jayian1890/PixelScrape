@@ -62,34 +62,50 @@ void TorrentManager::peer_worker(const std::string &torrent_id) {
             torrent->metadata, torrent->metadata.info_hash, torrent->peer_id,
             peer_info, *torrent->piece_manager);
 
-        // Set callbacks
-        peer_conn->set_piece_callback([this, torrent_id](
-                                          size_t index, size_t begin,
-                                          const std::vector<uint8_t> &data) {
-          std::lock_guard<std::mutex> lock(mutex_);
-          auto it = torrents_.find(torrent_id);
-          if (it != torrents_.end()) {
-            if (it->second->piece_manager->receive_block(index, begin, data)) {
-              it->second->downloaded_bytes += data.size();
-              if (it->second->piece_manager->is_piece_complete(index)) {
-                if (it->second->piece_manager->verify_piece(index)) {
-                  // Piece verified!
-                  // Send HAVE to all peers
-                  // Use a copy to avoid iterating while modified or locking
-                  // issues
-                  auto peers_snapshot = it->second->peers;
-                  for (auto &p : peers_snapshot) {
-                    // Sending HAVE is async/non-blocking ideally, or fast
-                    // enough
-                    if (p->is_connected()) {
-                      p->set_have_piece(index, true);
+        // Set callbacks - IMPORTANT: Do not hold mutex_ while calling
+        // piece_manager to avoid deadlock with update_speeds() which acquires
+        // locks in opposite order
+        peer_conn->set_piece_callback(
+            [this, torrent_id](size_t index, size_t begin,
+                               const std::vector<uint8_t> &data) {
+              // Extract piece_manager and peers snapshot with a quick lock
+              PieceManager *piece_manager = nullptr;
+              std::vector<std::shared_ptr<PeerConnection>> peers_snapshot;
+
+              {
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto it = torrents_.find(torrent_id);
+                if (it == torrents_.end())
+                  return;
+                piece_manager = it->second->piece_manager.get();
+                peers_snapshot = it->second->peers;
+              }
+              // Lock released here - now safe to call piece_manager
+
+              // Call piece_manager methods WITHOUT holding mutex_
+              if (piece_manager->receive_block(index, begin, data)) {
+                // Update downloaded_bytes with a quick lock
+                {
+                  std::lock_guard<std::mutex> lock(mutex_);
+                  auto it = torrents_.find(torrent_id);
+                  if (it != torrents_.end()) {
+                    it->second->downloaded_bytes += data.size();
+                  }
+                }
+
+                if (piece_manager->is_piece_complete(index)) {
+                  if (piece_manager->verify_piece(index)) {
+                    // Piece verified! Send HAVE to all peers
+                    // Using peers_snapshot (already copied above)
+                    for (auto &p : peers_snapshot) {
+                      if (p->is_connected()) {
+                        p->set_have_piece(index, true);
+                      }
                     }
                   }
                 }
               }
-            }
-          }
-        });
+            });
 
         // Enqueue connection request — do not block the peer_worker thread.
         {
